@@ -6,6 +6,30 @@
 2. **简化 Action Space**：每个起始方向使用 Dijkstra 找到最优路径
 3. **修正自己棋子处理**：跳过自己的棋子时留在原位，不进入陰间
 4. **扩展跳跃选项**：在最优路径终点可选择上叠或跳出棋盘
+5. **重构 Action 类**：使用结构化字段，清晰表达 action 语义
+6. **添加得分信息**：每个 action 包含 `expected_score`，支持 greedy approach
+
+---
+
+## 💡 关键设计决策
+
+### 1. Action 结构重构
+**理由：** 原来的 `params: tuple` 不够直观，难以理解和调试
+
+**新设计：**
+- 使用命名字段代替元组
+- 所有 action 类型使用统一的字段结构
+- 添加 `expected_score` 字段用于策略选择
+
+### 2. Expected Score 的含义
+- **REVIVE**: `expected_score = 0`（复活不直接得分）
+- **MOVE**: `expected_score = 0`（移动不直接得分）
+- **JUMP**: `expected_score = Dijkstra计算的敌方棋子得分总和`
+
+**优势：**
+- 支持 greedy baseline agent
+- 便于 RL 算法使用（作为价值函数的参考）
+- 方便调试和分析策略
 
 ---
 
@@ -33,12 +57,39 @@ class Piece:
 @dataclass
 class Action:
     action_type: ActionType
-    params: tuple
-    # REVIVE: (tier, (row, col))
-    # MOVE: ((from_row, from_col), (to_row, to_col))
-    # JUMP: ((from_row, from_col), jump_sequence)
-    #   - jump_sequence: [((land_row, land_col), [(jumped_r, jumped_c), ...]), ...]
+    from_pos: Optional[Tuple[int, int]]  # None for REVIVE
+    to_pos: Optional[Tuple[int, int]]    # 最终着陆位置，(-1,-1) for 跳出棋盘
+    tier: Optional[int]                  # REVIVE 的 tier
+    initial_direction: Optional[str]     # JUMP 的初始方向: 'up'/'down'/'left'/'right'
+    jump_sequence: Optional[List[Tuple]] # JUMP 的完整路径
+    expected_score: float                # 预期得分（用于 greedy approach）
+    
+    # 便于调试和理解
+    def __repr__(self):
+        if self.action_type == ActionType.REVIVE:
+            return f"REVIVE(tier={self.tier}, to={self.to_pos}, score={self.expected_score})"
+        elif self.action_type == ActionType.MOVE:
+            return f"MOVE(from={self.from_pos}, to={self.to_pos}, score={self.expected_score})"
+        else:  # JUMP
+            return f"JUMP(from={self.from_pos}, dir={self.initial_direction}, steps={len(self.jump_sequence)}, score={self.expected_score})"
 ```
+
+**Action 字段说明：**
+- **REVIVE**: `action_type=REVIVE, tier=X, to_pos=(r,c), expected_score=0`
+- **MOVE**: `action_type=MOVE, from_pos=(r,c), to_pos=(r,c), expected_score=0`
+- **JUMP**: `action_type=JUMP, from_pos=(r,c), initial_direction='up', jump_sequence=[...], expected_score=X`
+
+**字段对照表：**
+
+| 字段 | REVIVE | MOVE | JUMP | 说明 |
+|-----|--------|------|------|------|
+| `action_type` | ✓ | ✓ | ✓ | 行动类型 enum |
+| `from_pos` | None | ✓ | ✓ | 起始位置 |
+| `to_pos` | ✓ | ✓ | ✓ | 最终着陆位置 |
+| `tier` | ✓ | None | None | 复活的棋子 tier |
+| `initial_direction` | None | None | ✓ | 跳跃初始方向 |
+| `jump_sequence` | None | None | ✓ | 完整跳跃路径 |
+| `expected_score` | ✓(=0) | ✓(=0) | ✓ | 预期得分 |
 
 ---
 
@@ -173,27 +224,51 @@ class Action:
   ```
 
 **`_get_jump_actions_from_position(row, col, player)`**
-- **功能**：为指定位置生成所有跳跃 actions
+- **功能**：为指定位置生成所有跳跃 actions（包含得分）
 - **输入**：起始位置、玩家
 - **输出**：`List[Action]`
 - **逻辑**：
   ```
   actions = []
   jumping_tier = sum(棋子tier)
+  opponent = Player.BLUE if player == Player.RED else Player.RED
   
-  # 获取4个方向的最优路径
+  # 获取4个方向的最优路径（已包含得分）
   best_paths = _get_best_paths_by_initial_direction(row, col, player)
   
-  for 方向, (path, end_pos, score) in best_paths.items():
+  for dir_name, (path, end_pos, base_score) in best_paths.items():
       # 基础 action：停在终点空格
-      actions.append(Action(JUMP, ((row, col), deepcopy(path))))
+      actions.append(Action(
+          action_type=ActionType.JUMP,
+          from_pos=(row, col),
+          to_pos=end_pos,
+          tier=None,
+          initial_direction=dir_name,
+          jump_sequence=deepcopy(path),
+          expected_score=base_score  # Dijkstra 计算的得分
+      ))
       
       # 扩展 action：上叠或跳出
       extended_options = _get_extended_jump_options(end_pos, jumping_tier, player)
       
       for option in extended_options:
+          # 计算扩展步骤的额外得分
+          extra_score = sum(
+              sum(p.tier for p in self.board[r][c] if p.player == opponent)
+              for r, c in option['jumped_pieces']
+          )
+          
           extended_path = deepcopy(path) + [(option['land_pos'], option['jumped_pieces'])]
-          actions.append(Action(JUMP, ((row, col), extended_path)))
+          
+          actions.append(Action(
+              action_type=ActionType.JUMP,
+              from_pos=(row, col),
+              to_pos=option['land_pos'],
+              tier=None,
+              initial_direction=dir_name,
+              jump_sequence=extended_path,
+              expected_score=base_score + extra_score  # 基础得分 + 扩展得分
+          ))
   
   return actions
   ```
@@ -201,7 +276,7 @@ class Action:
 #### 2.2 其他 Action 类型
 
 **`get_legal_actions()`**
-- **功能**：获取当前玩家所有合法 actions
+- **功能**：获取当前玩家所有合法 actions（包含预期得分）
 - **逻辑**：
   ```
   actions = []
@@ -211,18 +286,35 @@ class Action:
   for tier in [1, 2, 3]:
       if self.underworld[player][tier] > 0:
           for row, col in 所有空格:
-              actions.append(Action(REVIVE, (tier, (row, col))))
+              actions.append(Action(
+                  action_type=ActionType.REVIVE,
+                  from_pos=None,
+                  to_pos=(row, col),
+                  tier=tier,
+                  initial_direction=None,
+                  jump_sequence=None,
+                  expected_score=0  # 复活不得分
+              ))
   
   # 2. 移动 actions
   for row, col in 所有自己的棋子位置:
       for 方向 in 4个方向:
-          if _is_valid_move(row, col, 目标位置, player):
-              actions.append(Action(MOVE, ((row, col), 目标位置)))
+          to_pos = 计算目标位置
+          if _is_valid_move(row, col, to_pos, player):
+              actions.append(Action(
+                  action_type=ActionType.MOVE,
+                  from_pos=(row, col),
+                  to_pos=to_pos,
+                  tier=None,
+                  initial_direction=None,
+                  jump_sequence=None,
+                  expected_score=0  # 移动不得分
+              ))
   
-  # 3. 跳跃 actions
+  # 3. 跳跃 actions（包含 Dijkstra 计算的得分）
   for row, col in 所有自己的棋子位置:
       jump_actions = _get_jump_actions_from_position(row, col, player)
-      actions.extend(jump_actions)
+      actions.extend(jump_actions)  # 已包含 expected_score
   
   return actions
   ```
@@ -241,12 +333,14 @@ class Action:
   
   match action.action_type:
       case REVIVE:
-          tier, (row, col) = action.params
+          tier = action.tier
+          row, col = action.to_pos
           self.board[row][col] = [Piece(player, tier)]
           self.underworld[player][tier] -= 1
       
       case MOVE:
-          (from_r, from_c), (to_r, to_c) = action.params
+          from_r, from_c = action.from_pos
+          to_r, to_c = action.to_pos
           pieces = self.board[from_r][from_c][:]  # 复制
           
           if 目标位置是空格:
@@ -257,7 +351,8 @@ class Action:
           self.board[from_r][from_c] = []
       
       case JUMP:
-          (from_r, from_c), jump_sequence = action.params
+          from_r, from_c = action.from_pos
+          jump_sequence = action.jump_sequence
           pieces = self.board[from_r][from_c][:]  # 复制
           self.board[from_r][from_c] = []
           
@@ -278,7 +373,7 @@ class Action:
                   ]
           
           # 最终着陆
-          final_land = jump_sequence[-1][0]
+          final_land = action.to_pos
           if final_land == (-1, -1):  # 跳出棋盘
               for piece in pieces:
                   self.underworld[player][piece.tier] += 1
@@ -293,7 +388,13 @@ class Action:
   if not done:
       self.current_player = opponent
   
-  return self.get_state(), reward, done, {}
+  # info 可以包含 action 的 expected_score vs 实际 reward
+  info = {
+      'expected_score': action.expected_score,
+      'actual_reward': reward
+  }
+  
+  return self.get_state(), reward, done, info
   ```
 
 ---
@@ -363,37 +464,46 @@ get_legal_actions()
 
 ## 🎯 实现步骤清单
 
+### Phase 0: 数据结构重构
+- [ ] 重构 `Action` dataclass - 添加结构化字段
+- [ ] 添加 `expected_score` 字段
+- [ ] 添加 `__repr__()` 方法用于调试
+
 ### Phase 1: 核心跳跃逻辑
-- [ ] 实现 `_try_jump_direction()` - 单步跳跃
-- [ ] 实现 `_dijkstra_from_position()` - Dijkstra 搜索
+- [ ] 实现 `_try_jump_direction()` - 单步跳跃（确保返回复制）
+- [ ] 实现 `_dijkstra_from_position()` - Dijkstra 搜索最优路径
 - [ ] 实现 `_get_best_paths_by_initial_direction()` - 4个方向最优路径
 - [ ] 实现 `_get_extended_jump_options()` - 终点扩展选项
-- [ ] 实现 `_get_jump_actions_from_position()` - 生成跳跃 actions
+- [ ] 实现 `_get_jump_actions_from_position()` - 生成跳跃 actions（含得分）
 
 ### Phase 2: Action 生成
-- [ ] 实现 `get_legal_actions()` - 整合所有 action 类型
+- [ ] 实现 `get_legal_actions()` - 整合所有 action 类型（含得分）
 - [ ] 实现 `_is_valid_move()` - 验证移动合法性
 - [ ] 实现 `_has_own_pieces()` - 辅助方法
+- [ ] 确保所有 actions 都有正确的 `expected_score`
 
 ### Phase 3: 执行逻辑
-- [ ] 实现 `step()` - 执行 action
-  - [ ] 处理 REVIVE
-  - [ ] 处理 MOVE
-  - [ ] 处理 JUMP（关键：自己棋子留在原位）
+- [ ] 修改 `step()` - 适配新 Action 结构
+  - [ ] 处理 REVIVE (使用 action.tier, action.to_pos)
+  - [ ] 处理 MOVE (使用 action.from_pos, action.to_pos)
+  - [ ] 处理 JUMP (使用 action.jump_sequence, 自己棋子留在原位)
 - [ ] 修正得分计算（只计算敌方棋子）
 - [ ] 更新陰间状态
+- [ ] 返回 info 包含 expected vs actual 比较
 
 ### Phase 4: GUI & 动画（可选）
 - [ ] 保留现有 GUI 渲染方法
 - [ ] 保留动画系统
 - [ ] 修正动画中的棋子处理逻辑
 
-### Phase 5: 测试
+### Phase 5: 测试与验证
 - [ ] 测试单步跳跃
 - [ ] 测试多步、多方向跳跃
 - [ ] 测试上叠和跳出扩展
 - [ ] 测试自己棋子不进入陰间
-- [ ] 测试 Action Space 大小是否合理
+- [ ] 测试 expected_score 计算正确性
+- [ ] 测试 greedy policy 能否正常运行
+- [ ] 验证 Action Space 大小是否合理（~300-400）
 
 ---
 
@@ -432,9 +542,25 @@ Dijkstra 终点：(1,1)
   (2,1): [B1]  # 可跳出到 (3,1)
 
 预期生成 actions：
-- 基础：停在 (1,1)
-- 扩展1：上叠到 (0,1)
-- 扩展2：跳出到边界外
+- 基础：停在 (1,1)，expected_score=X
+- 扩展1：上叠到 (0,1)，expected_score=X+0 (跳过R3不得分)
+- 扩展2：跳出到边界外，expected_score=X+1 (跳过B1得1分)
+```
+
+### 测试4：Expected Score 计算
+```
+初始局面：
+  row 1: [R1] [ ] [ ]
+  row 2: [B2] [ ] [R3]
+  row 3: [B1] [ ] [ ]
+
+从 (2,2) 的 R3 往左跳：
+  (2,2) → 跳过 (2,1)空 → 着陆 (2,0) → 跳过 (3,0)B1 → 出界
+
+预期：
+- expected_score = 1 (只计算 B1)
+- B1 进入陰间
+- R3 进入陰间（自己跳出）
 ```
 
 ---
@@ -458,12 +584,44 @@ Dijkstra 终点：(1,1)
 
 ---
 
+## 🎲 Greedy Approach 支持
+
+由于每个 Action 都包含 `expected_score` 字段，可以轻松实现 greedy 策略：
+
+```python
+def greedy_policy(env):
+    """选择预期得分最高的 action"""
+    legal_actions = env.get_legal_actions()
+    
+    if not legal_actions:
+        return None
+    
+    # 按 expected_score 排序，选择最高分
+    best_action = max(legal_actions, key=lambda a: a.expected_score)
+    return best_action
+```
+
+**注意事项：**
+- 复活和移动的 `expected_score=0`
+- 只有跳跃 actions 有非零得分
+- 如果所有 actions 得分都是 0，greedy 会随机选择（可以添加其他启发式规则）
+
+**Expected Score 的额外用途：**
+1. **作为特征输入 RL 算法**：可以将 `expected_score` 作为 action embedding 的一部分
+2. **Reward Shaping**：可以用 `expected_score` 设计中间奖励
+3. **Action Filtering**：可以过滤掉 `expected_score=0` 且不是必要的 actions（如低价值移动）
+4. **Curriculum Learning**：训练初期只考虑高 `expected_score` 的 actions
+
+---
+
 ## 🔄 与旧代码的主要变化
 
 | 项目 | 旧代码 | 新代码 |
 |-----|--------|--------|
 | 跳跃路径生成 | 递归探索所有可能组合 | Dijkstra 每个初始方向找最优路径 |
 | Action Space | 指数级增长 | 线性增长（每方向1条+扩展） |
+| Action 结构 | `(action_type, params)` 简单元组 | 结构化字段，包含 `expected_score` |
+| 得分信息 | action 不包含得分 | 每个 action 包含预期得分，支持 greedy |
 | 自己棋子处理 | 跳过后进入陰间 | 留在原位 |
 | 路径终点 | 包含所有可能终点 | 只包含空格，上叠/跳出单独扩展 |
 | 引用安全 | 部分复制 | 全面使用深拷贝 |
@@ -498,8 +656,80 @@ Dijkstra 终点：(1,1)
 - [ ] 跳过自己的棋子不进入陰间
 - [ ] Dijkstra 只探索落在空格的路径
 - [ ] 每个初始方向最多生成有限个 actions
+- [ ] 所有 Action 都包含 `expected_score` 字段
+- [ ] JUMP actions 的得分计算正确（基础+扩展）
+- [ ] REVIVE 和 MOVE 的 `expected_score=0`
 - [ ] 测试多方向跳跃路径是否正确
 - [ ] 验证 Action Space 大小合理
+- [ ] 测试 greedy policy 能否正常工作
+
+---
+
+## 🎮 使用示例
+
+### Greedy Baseline Agent
+```python
+# simple_baseline.py
+from Zombie_env import ZombieEnv
+
+env = ZombieEnv(gui=True)
+
+while True:
+    # 获取所有合法 actions（已包含 expected_score）
+    legal_actions = env.get_legal_actions()
+    
+    if not legal_actions:
+        break
+    
+    # Greedy: 选择得分最高的 action
+    best_action = max(legal_actions, key=lambda a: a.expected_score)
+    
+    print(f"Selected: {best_action}")
+    
+    state, reward, done, info = env.step(best_action)
+    env.render()
+    
+    if done:
+        print(f"Game Over! Winner: {env.current_player.name}")
+        break
+
+env.close()
+```
+
+### Debug: 查看所有 actions 的得分
+```python
+legal_actions = env.get_legal_actions()
+
+# 按得分排序
+sorted_actions = sorted(legal_actions, key=lambda a: a.expected_score, reverse=True)
+
+print("Top 5 actions:")
+for i, action in enumerate(sorted_actions[:5], 1):
+    print(f"{i}. {action}")
+```
+
+### 验证 Expected Score 正确性
+```python
+def validate_expected_score(env, action):
+    """验证 expected_score 是否等于实际 reward"""
+    # 保存当前状态
+    state_backup = env.get_state()
+    
+    # 执行 action
+    _, reward, _, info = env.step(action)
+    
+    # 比较
+    if reward != action.expected_score:
+        print(f"⚠️  Mismatch! Expected: {action.expected_score}, Actual: {reward}")
+        print(f"   Action: {action}")
+    else:
+        print(f"✓ Score matches: {reward}")
+    
+    # 恢复状态（如果需要）
+    # env.load_state(state_backup)
+    
+    return reward == action.expected_score
+```
 
 ---
 
