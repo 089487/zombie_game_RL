@@ -16,13 +16,13 @@ from Zombie_env import ZombieEnv, Player, Action, ActionType, Piece
 class ZombieEnvGui:
     """GUI wrapper for ZombieEnv that adds visual rendering"""
     
-    def __init__(self, env: ZombieEnv, cell_size: int = 120, fps: int = 30):
+    def __init__(self, env: ZombieEnv, cell_size: int = 100, fps: int = 30):
         """
         Initialize GUI wrapper
         
         Args:
             env: ZombieEnv instance to wrap
-            cell_size: Size of each board cell in pixels
+            cell_size: Size of each board cell in pixels (default: 100)
             fps: Frames per second for animations
         """
         self.env = env
@@ -32,8 +32,8 @@ class ZombieEnvGui:
         # Calculate window dimensions
         self.board_size = env.board_size
         self.board_width = self.board_size * cell_size
-        self.margin = 100
-        self.info_height = 200
+        self.margin = 50  # Reduced from 100
+        self.info_height = 130  # Reduced from 200
         self.window_width = self.board_width + 2 * self.margin
         self.window_height = self.board_width + 2 * self.margin + self.info_height
         
@@ -68,6 +68,10 @@ class ZombieEnvGui:
         # Animation state
         self.animation_queue = []
         self.is_animating = False
+        
+        # History for undo functionality
+        self.state_history = []
+        self.action_history = []
     def __getattr__(self, name):
         if name == 'env':
             raise AttributeError("ZombieEnvGui has no attribute 'env' to prevent infinite recursion")
@@ -108,6 +112,50 @@ class ZombieEnvGui:
         
         return result
     
+    def save_state(self, action: Action):
+        """Save current state before action for undo"""
+        state = {
+            'board': [[cell[:] for cell in row] for row in self.env.board],
+            'underworld': {p: dict(u) for p, u in self.env.underworld.items()},
+            'scores': dict(self.env.scores),
+            'current_player': self.env.current_player
+        }
+        self.state_history.append(state)
+        self.action_history.append(action)
+    
+    def undo(self) -> bool:
+        """Undo last action, return True if successful"""
+        if not self.state_history:
+            return False
+        
+        # Restore previous state
+        state = self.state_history.pop()
+        self.action_history.pop()
+        
+        # Restore board
+        self.env.board = [[cell[:] for cell in row] for row in state['board']]
+        
+        # Restore underworld
+        for player, underworld in state['underworld'].items():
+            self.env.underworld[player] = dict(underworld)
+        
+        # Restore scores
+        self.env.scores = dict(state['scores'])
+        
+        # Restore current player
+        self.env.current_player = state['current_player']
+        
+        return True
+    
+    def can_undo(self) -> bool:
+        """Check if undo is available"""
+        return len(self.state_history) > 0
+    
+    def clear_history(self):
+        """Clear undo history"""
+        self.state_history.clear()
+        self.action_history.clear()
+    
     def close(self):
         """Close GUI"""
         pygame.quit()
@@ -123,7 +171,7 @@ class ZombieEnvGui:
         Args:
             last_action: Last action taken (for highlighting)
             highlight_cells: List of (row, col) to highlight
-            show_wait_prompt: Whether to show "Press any key" prompt
+            show_wait_prompt: Whether to show continue button (deprecated, call wait_for_continue_button instead)
         """
         # Handle pygame events
         for event in pygame.event.get():
@@ -143,16 +191,12 @@ class ZombieEnvGui:
         # Draw info panel
         self._draw_info_panel(last_action)
         
-        # Draw wait prompt if requested
-        if show_wait_prompt:
-            self._draw_wait_prompt()
-        
         # Update display
         pygame.display.flip()
         self.clock.tick(self.fps)
     
     def _draw_wait_prompt(self):
-        """Draw 'Press any key to continue' prompt"""
+        """Draw 'Press any key to continue' prompt (deprecated, use _draw_continue_button)"""
         center_x = self.window_width // 2
         prompt_y = self.window_height - 40
         
@@ -178,6 +222,44 @@ class ZombieEnvGui:
         
         # Draw text
         self.screen.blit(text, text_rect)
+    
+    def _draw_continue_button(self, mouse_pos: tuple) -> pygame.Rect:
+        """Draw continue button at bottom center
+        
+        Args:
+            mouse_pos: Current mouse position
+            
+        Returns:
+            Button rectangle
+        """
+        center_x = self.window_width // 2
+        button_y = self.window_height - 50  # Reduced from 60
+        button_width = 135  # Reduced from 180 (75%)
+        button_height = 30  # Reduced from 40 (75%)
+        
+        button_rect = pygame.Rect(
+            center_x - button_width // 2,
+            button_y,
+            button_width,
+            button_height
+        )
+        
+        # Highlight on hover
+        if button_rect.collidepoint(mouse_pos):
+            button_color = (100, 200, 100)
+        else:
+            button_color = (70, 170, 70)
+        
+        # Draw button
+        pygame.draw.rect(self.screen, button_color, button_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), button_rect, 3, border_radius=10)
+        
+        # Draw text
+        text = self.font_medium.render("Continue ►", True, (255, 255, 255))
+        text_rect = text.get_rect(center=button_rect.center)
+        self.screen.blit(text, text_rect)
+        
+        return button_rect
     
     def _draw_board(self, highlight_cells: Optional[list] = None):
         """Draw the game board"""
@@ -274,18 +356,18 @@ class ZombieEnvGui:
     
     def _draw_info_panel(self, last_action: Optional[Action] = None):
         """Draw information panel with scores and status"""
-        panel_y = self.margin + self.board_width + 20
+        panel_y = self.margin + self.board_width + 10  # Reduced from 20
         center_x = self.window_width // 2
         
         # Draw current player indicator
         current_player_text = f"Current Player: {self.env.current_player.name}"
         player_color = self.colors['red'] if self.env.current_player == Player.RED else self.colors['blue']
-        text = self.font_large.render(current_player_text, True, player_color)
+        text = self.font_medium.render(current_player_text, True, player_color)
         text_rect = text.get_rect(center=(center_x, panel_y))
         self.screen.blit(text, text_rect)
         
         # Draw scores
-        score_y = panel_y + 50
+        score_y = panel_y + 35  # Reduced from 50
         red_score = f"RED: {self.env.scores[Player.RED]}/{self.env.win_score}"
         blue_score = f"BLUE: {self.env.scores[Player.BLUE]}/{self.env.win_score}"
         
@@ -299,7 +381,7 @@ class ZombieEnvGui:
         self.screen.blit(blue_text, blue_rect)
         
         # Draw underworld counts
-        underworld_y = score_y + 50
+        underworld_y = score_y + 35  # Reduced from 50
         
         for i, player in enumerate([Player.RED, Player.BLUE]):
             x_offset = -200 if player == Player.RED else 200
@@ -315,7 +397,7 @@ class ZombieEnvGui:
         
         # Draw last action
         if last_action:
-            action_y = underworld_y + 40
+            action_y = underworld_y + 30  # Reduced from 40
             action_text = f"Last: {last_action}"
             text = self.font_small.render(action_text, True, self.colors['text'])
             text_rect = text.get_rect(center=(center_x, action_y))
@@ -363,7 +445,7 @@ class ZombieEnvGui:
             time.sleep(0.4)
     
     def wait_for_key(self):
-        """Wait for user to press a key"""
+        """Wait for user to press a key (deprecated, use wait_for_continue_button)"""
         waiting = True
         while waiting:
             for event in pygame.event.get():
@@ -372,6 +454,31 @@ class ZombieEnvGui:
                     return False
                 if event.type == pygame.KEYDOWN:
                     waiting = False
+            self.clock.tick(30)
+        return True
+    
+    def wait_for_continue_button(self) -> bool:
+        """Wait for user to click continue button
+        
+        Returns:
+            True if continue clicked, False if window closed
+        """
+        waiting = True
+        while waiting:
+            mouse_pos = pygame.mouse.get_pos()
+            
+            # Redraw with continue button
+            button_rect = self._draw_continue_button(mouse_pos)
+            pygame.display.flip()
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.close()
+                    return False
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if button_rect.collidepoint(mouse_pos):
+                        waiting = False
+            
             self.clock.tick(30)
         return True
 
@@ -392,9 +499,9 @@ def demo_gui():
     agents = {Player.RED: agent_red, Player.BLUE: agent_blue}
     
     # Initial render
-    env_gui.render(show_wait_prompt=True)
-    print("Press any key to start...")
-    if not env_gui.wait_for_key():
+    env_gui.render()
+    print("Click Continue button to start...")
+    if not env_gui.wait_for_continue_button():
         return
     
     # Game loop
@@ -416,8 +523,8 @@ def demo_gui():
         # Execute with animation
         state, reward, done, info = env_gui.step(action, animate=True)
         
-        # Render with wait prompt
-        env_gui.render(last_action=action, show_wait_prompt=not done)
+        # Render
+        env_gui.render(last_action=action)
         
         last_action = action
         turn += 1
@@ -435,13 +542,13 @@ def demo_gui():
             env_gui.screen.blit(text, text_rect)
             pygame.display.flip()
             
-            print("Press any key to close...")
-            env_gui.wait_for_key()
+            print("Click Continue button to close...")
+            env_gui.wait_for_continue_button()
             break
         
-        # Wait for key press before next turn
-        print("Press any key to continue...")
-        if not env_gui.wait_for_key():
+        # Wait for continue button before next turn
+        print("Click Continue button to continue...")
+        if not env_gui.wait_for_continue_button():
             break
     
     env_gui.close()

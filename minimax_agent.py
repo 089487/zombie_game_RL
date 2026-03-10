@@ -303,9 +303,9 @@ def play_game(agent1, agent2, render: bool = True, max_turns: int = 100) -> Opti
         print("\n" + "="*80)
         print("GAME START: Minimax Agent Demo")
         print("="*80)
-        env_gui.render(show_wait_prompt=True)
-        print("Press any key to start...")
-        if not env_gui.wait_for_key():
+        env_gui.render()
+        print("Click Continue button to start...")
+        if not env_gui.wait_for_continue_button():
             return
  
     
@@ -344,9 +344,9 @@ def play_game(agent1, agent2, render: bool = True, max_turns: int = 100) -> Opti
                 print(f"🏆 {winner.name} WINS with {env.scores[winner]} points!")
                 print(f"{'='*80}")
             return winner
-                # Wait for key press before next turn
-        print("Press any key to continue...")
-        if not env_gui.wait_for_key():
+                # Wait for continue button before next turn
+        print("Click Continue button to continue...")
+        if not env_gui.wait_for_continue_button():
             break
     
     # Max turns reached - determine winner by score

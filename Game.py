@@ -149,9 +149,9 @@ class Game:
         # Initial render
         if self.env_gui:
             if self.use_gui:
-                self.env_gui.render(show_wait_prompt=True)
-                print("\nPress any key to start...")
-                if not self.env_gui.wait_for_key():
+                self.env_gui.render()
+                print("\nClick Continue button to start...")
+                if not self.env_gui.wait_for_continue_button():
                     return {'winner': None, 'reason': 'cancelled'}
         else:
             if self.verbose:
@@ -208,12 +208,12 @@ class Game:
                 if self.use_gui:
                     # Check if it's manual agent's turn
                     is_manual = hasattr(agent, '_select_action_gui')
-                    self.env_gui.render(last_action=action, show_wait_prompt=not done and not is_manual)
+                    self.env_gui.render(last_action=action)
                     
-                    # Wait for keypress (except for manual agent's next turn)
+                    # Wait for continue button (except for manual agent's next turn)
                     if not done and not is_manual:
-                        print("Press any key to continue...")
-                        if not self.env_gui.wait_for_key():
+                        print("Click Continue button to continue...")
+                        if not self.env_gui.wait_for_continue_button():
                             return {'winner': None, 'reason': 'cancelled', 'turns': turn}
             else:
                 if self.verbose:
@@ -242,8 +242,8 @@ class Game:
                     self.env_gui.screen.blit(text, text_rect)
                     pygame.display.flip()
                     
-                    print("\nPress any key to close...")
-                    self.env_gui.wait_for_key()
+                    print("\nClick Continue button to close...")
+                    self.env_gui.wait_for_continue_button()
                 
                 return {
                     'winner': winner,

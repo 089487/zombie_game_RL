@@ -52,8 +52,9 @@ class ManualAgent:
         
         Level 1: Choose action type (JUMP/REVIVE/MOVE)
         Level 2: For JUMP/MOVE - choose piece to move (from position)
-                 For REVIVE - choose specific action
+                 For REVIVE - choose position to revive to (to position)
         Level 3: For JUMP/MOVE - choose destination (to position)
+                 For REVIVE - choose tier to revive (T1/T2/T3)
         
         Returns:
             Selected action or None if cancelled
@@ -71,9 +72,10 @@ class ManualAgent:
         
         # Menu state
         selected_action = None
-        current_menu_level = 1  # 1 = type, 2 = from (or action for REVIVE), 3 = to
+        current_menu_level = 1  # 1 = type, 2 = from/to position, 3 = destination/tier
         selected_type = None
         selected_from_pos = None  # For MOVE/JUMP
+        selected_to_pos = None  # For REVIVE
         scroll_offset = 0
         max_visible = 15
         prev_hovered = None
@@ -110,20 +112,16 @@ class ManualAgent:
                                 break
             
             elif current_menu_level == 2:
-                # Level 2: For REVIVE - action list, For MOVE/JUMP - from position
+                # Level 2: Choose position (from_pos for MOVE/JUMP, to_pos for REVIVE)
                 if selected_type == 'REVIVE':
-                    # REVIVE: directly show action list (2-level menu)
-                    action_buttons, hovered = self._draw_action_menu(
+                    # REVIVE: show to position selection
+                    to_buttons, hovered = self._draw_to_position_menu(
                         env_gui,
-                        selected_type,
                         action_groups[selected_type],
-                        None,  # No from_pos for REVIVE
-                        scroll_offset,
-                        max_visible,
                         mouse_pos
                     )
                     
-                    # Handle action selection and back button
+                    # Handle to position selection
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             pygame.quit()
@@ -136,19 +134,14 @@ class ManualAgent:
                                 need_redraw = True
                                 print("Back to type selection")
                             else:
-                                for rect, action in action_buttons:
+                                for rect, to_pos in to_buttons:
                                     if rect.collidepoint(mouse_pos):
-                                        selected_action = action
-                                        print(f"Selected: {action}")
-                                        self._highlight_action(env_gui, action)
-                                        pygame.time.wait(500)
+                                        selected_to_pos = to_pos
+                                        current_menu_level = 3
+                                        scroll_offset = 0
+                                        need_redraw = True
+                                        print(f"Selected revive position: {to_pos}")
                                         break
-                        
-                        elif event.type == pygame.MOUSEWHEEL:
-                            scroll_offset -= event.y
-                            scroll_offset = max(0, min(scroll_offset, 
-                                                     max(0, len(action_groups[selected_type]) - max_visible)))
-                            need_redraw = True
                 else:
                     # MOVE/JUMP: show from position selection
                     from_buttons, hovered = self._draw_from_position_menu(
@@ -181,47 +174,90 @@ class ManualAgent:
                                         break
             
             else:  # current_menu_level == 3
-                # Level 3: Show destination options for selected piece
-                filtered_actions = [a for a in action_groups[selected_type] 
-                                   if a.from_pos == selected_from_pos]
-                
-                action_buttons, hovered = self._draw_action_menu(
-                    env_gui,
-                    selected_type,
-                    filtered_actions,
-                    selected_from_pos,
-                    scroll_offset,
-                    max_visible,
-                    mouse_pos
-                )
-                
-                # Handle destination selection
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        pygame.quit()
-                        return None
+                # Level 3: Show final selection
+                if selected_type == 'REVIVE':
+                    # REVIVE: show tier options for selected position
+                    filtered_actions = [a for a in action_groups[selected_type] 
+                                       if a.to_pos == selected_to_pos]
                     
-                    elif event.type == pygame.MOUSEBUTTONDOWN:
-                        if self._check_back_button(env_gui, mouse_pos):
-                            current_menu_level = 2
-                            selected_from_pos = None
-                            scroll_offset = 0
+                    tier_buttons, hovered = self._draw_tier_menu(
+                        env_gui,
+                        filtered_actions,
+                        selected_to_pos,
+                        scroll_offset,
+                        max_visible,
+                        mouse_pos
+                    )
+                    
+                    # Handle tier selection
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            pygame.quit()
+                            return None
+                        
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            if self._check_back_button(env_gui, mouse_pos):
+                                current_menu_level = 2
+                                selected_to_pos = None
+                                scroll_offset = 0
+                                need_redraw = True
+                                print("Back to position selection")
+                            else:
+                                for rect, action in tier_buttons:
+                                    if rect.collidepoint(mouse_pos):
+                                        selected_action = action
+                                        print(f"Selected: {action}")
+                                        self._highlight_action(env_gui, action)
+                                        pygame.time.wait(500)
+                                        break
+                        
+                        elif event.type == pygame.MOUSEWHEEL:
+                            scroll_offset -= event.y
+                            scroll_offset = max(0, min(scroll_offset, 
+                                                     max(0, len(filtered_actions) - max_visible)))
                             need_redraw = True
-                            print("Back to from position selection")
-                        else:
-                            for rect, action in action_buttons:
-                                if rect.collidepoint(mouse_pos):
-                                    selected_action = action
-                                    print(f"Selected: {action}")
-                                    self._highlight_action(env_gui, action)
-                                    pygame.time.wait(500)
-                                    break
+                else:
+                    # MOVE/JUMP: show destination options for selected piece
+                    filtered_actions = [a for a in action_groups[selected_type] 
+                                       if a.from_pos == selected_from_pos]
                     
-                    elif event.type == pygame.MOUSEWHEEL:
-                        scroll_offset -= event.y
-                        scroll_offset = max(0, min(scroll_offset, 
-                                                 max(0, len(filtered_actions) - max_visible)))
-                        need_redraw = True
+                    action_buttons, hovered = self._draw_action_menu(
+                        env_gui,
+                        selected_type,
+                        filtered_actions,
+                        selected_from_pos,
+                        scroll_offset,
+                        max_visible,
+                        mouse_pos
+                    )
+                    
+                    # Handle destination selection
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            pygame.quit()
+                            return None
+                        
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            if self._check_back_button(env_gui, mouse_pos):
+                                current_menu_level = 2
+                                selected_from_pos = None
+                                scroll_offset = 0
+                                need_redraw = True
+                                print("Back to from position selection")
+                            else:
+                                for rect, action in action_buttons:
+                                    if rect.collidepoint(mouse_pos):
+                                        selected_action = action
+                                        print(f"Selected: {action}")
+                                        self._highlight_action(env_gui, action)
+                                        pygame.time.wait(500)
+                                        break
+                        
+                        elif event.type == pygame.MOUSEWHEEL:
+                            scroll_offset -= event.y
+                            scroll_offset = max(0, min(scroll_offset, 
+                                                     max(0, len(filtered_actions) - max_visible)))
+                            need_redraw = True
             
             # Check if hover changed
             if prev_hovered != hovered:
@@ -277,7 +313,7 @@ class ManualAgent:
         # Type buttons
         type_buttons = []
         y_offset = panel_y + 90
-        button_height = 80
+        button_height = 60  # Reduced from 80 (75%)
         button_spacing = 20
         
         type_configs = [
@@ -389,7 +425,7 @@ class ManualAgent:
         from_buttons = []
         hovered_from_pos = None
         y_offset = panel_y + 60
-        button_height = 70
+        button_height = 52  # Reduced from 70 (75%)
         button_spacing = 10
         
         for from_pos in sorted_positions:
@@ -459,6 +495,211 @@ class ManualAgent:
         highlight_surface.fill((100, 200, 255))
         env_gui.screen.blit(highlight_surface, (x, y))
     
+    def _draw_to_position_menu(self, env_gui: ZombieEnvGui,
+                              actions: List[Action],
+                              mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Tuple[int, int]]], Optional[Tuple[int, int]]]:
+        """
+        Draw Level 2 menu for REVIVE: select position to revive to
+        
+        Returns:
+            Tuple of (list of (rect, to_pos) tuples, hovered to_pos)
+        """
+        # Panel dimensions
+        panel_x = env_gui.window_width - 400
+        panel_y = 50
+        panel_width = 380
+        panel_height = env_gui.window_height - 100
+        
+        # Draw panel background
+        panel_surface = pygame.Surface((panel_width, panel_height))
+        panel_surface.fill((250, 250, 250))
+        panel_surface.set_alpha(240)
+        env_gui.screen.blit(panel_surface, (panel_x, panel_y))
+        
+        # Draw border
+        pygame.draw.rect(env_gui.screen, (100, 100, 100), 
+                        (panel_x, panel_y, panel_width, panel_height), 3)
+        
+        # Back button
+        back_button_rect = self._draw_back_button(env_gui, panel_x, panel_y, mouse_pos)
+        
+        # Title
+        title_text = env_gui.font_medium.render(
+            f"Select Revive Position", 
+            True, 
+            env_gui.colors['blue']
+        )
+        env_gui.screen.blit(title_text, (panel_x + 60, panel_y + 15))
+        
+        # Get unique to positions
+        to_positions = {}
+        for action in actions:
+            to_pos = action.to_pos
+            if to_pos not in to_positions:
+                to_positions[to_pos] = []
+            to_positions[to_pos].append(action)
+        
+        # Sort by position
+        sorted_positions = sorted(to_positions.keys())
+        
+        # To position buttons
+        to_buttons = []
+        hovered_to_pos = None
+        y_offset = panel_y + 60
+        button_height = 52
+        button_spacing = 10
+        
+        for to_pos in sorted_positions:
+            row, col = to_pos
+            action_count = len(to_positions[to_pos])
+            
+            # Get available tiers at this position
+            tiers = sorted(set(a.tier for a in to_positions[to_pos]))
+            tier_str = ", ".join(f"T{t}" for t in tiers)
+            
+            # Button rectangle
+            button_rect = pygame.Rect(
+                panel_x + 20,
+                y_offset,
+                panel_width - 40,
+                button_height
+            )
+            
+            # Highlight on hover
+            if button_rect.collidepoint(mouse_pos):
+                pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect, border_radius=10)
+                hovered_to_pos = to_pos
+                # Preview this position on board
+                self._preview_to_position(env_gui, to_pos)
+            else:
+                pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect, border_radius=10)
+            
+            # Border
+            pygame.draw.rect(env_gui.screen, env_gui.colors['blue'], button_rect, 3, border_radius=10)
+            
+            # Position text
+            pos_text = env_gui.font_large.render(f"({row}, {col})", True, env_gui.colors['blue'])
+            pos_rect = pos_text.get_rect(center=(button_rect.centerx, button_rect.centery - 15))
+            env_gui.screen.blit(pos_text, pos_rect)
+            
+            # Available tiers info
+            info_text = env_gui.font_small.render(
+                f"{tier_str} available", 
+                True, 
+                (100, 100, 100)
+            )
+            info_rect = info_text.get_rect(center=(button_rect.centerx, button_rect.centery + 20))
+            env_gui.screen.blit(info_text, info_rect)
+            
+            to_buttons.append((button_rect, to_pos))
+            y_offset += button_height + button_spacing
+        
+        return to_buttons, hovered_to_pos
+    
+    def _preview_to_position(self, env_gui: ZombieEnvGui, to_pos: Tuple[int, int]):
+        """Highlight the to position on board"""
+        board_x = env_gui.margin
+        board_y = env_gui.margin
+        
+        row, col = to_pos
+        x = board_x + col * env_gui.cell_size
+        y = board_y + row * env_gui.cell_size
+        
+        # Draw semi-transparent highlight (green for revive target)
+        highlight_surface = pygame.Surface((env_gui.cell_size, env_gui.cell_size))
+        highlight_surface.set_alpha(100)
+        highlight_surface.fill((100, 255, 100))
+        env_gui.screen.blit(highlight_surface, (x, y))
+    
+    def _draw_tier_menu(self, env_gui: ZombieEnvGui,
+                       actions: List[Action],
+                       to_pos: Tuple[int, int],
+                       scroll_offset: int,
+                       max_visible: int,
+                       mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Action]], Optional[Action]]:
+        """
+        Draw Level 3 menu for REVIVE: select tier to revive
+        
+        Returns:
+            Tuple of (list of (rect, action) pairs, hovered action)
+        """
+        # Panel dimensions
+        panel_x = env_gui.window_width - 400
+        panel_y = 50
+        panel_width = 380
+        panel_height = env_gui.window_height - 100
+        
+        # Draw panel background
+        panel_surface = pygame.Surface((panel_width, panel_height))
+        panel_surface.fill((250, 250, 250))
+        panel_surface.set_alpha(240)
+        env_gui.screen.blit(panel_surface, (panel_x, panel_y))
+        
+        # Draw border
+        pygame.draw.rect(env_gui.screen, (100, 100, 100), 
+                        (panel_x, panel_y, panel_width, panel_height), 3)
+        
+        # Back button
+        back_button_rect = self._draw_back_button(env_gui, panel_x, panel_y, mouse_pos)
+        
+        # Title
+        title_text = env_gui.font_medium.render(
+            f"Revive to {to_pos}", 
+            True, 
+            env_gui.colors['blue']
+        )
+        env_gui.screen.blit(title_text, (panel_x + 60, panel_y + 15))
+        
+        # Tier selection buttons
+        button_rects = []
+        y_offset = panel_y + 60
+        button_height = 52
+        button_spacing = 10
+        hovered_action = None
+        
+        # Sort actions by tier (descending)
+        sorted_actions = sorted(actions, key=lambda a: a.tier, reverse=True)
+        
+        # Draw visible actions (with scrolling if needed)
+        visible_actions = sorted_actions[scroll_offset:scroll_offset + max_visible]
+        
+        for action in visible_actions:
+            # Button rectangle
+            button_rect = pygame.Rect(
+                panel_x + 20,
+                y_offset,
+                panel_width - 40,
+                button_height
+            )
+            
+            # Highlight on hover
+            if button_rect.collidepoint(mouse_pos):
+                pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect, border_radius=10)
+                hovered_action = action
+                # Show action preview on board
+                self._preview_action(env_gui, action)
+            else:
+                pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect, border_radius=10)
+            
+            # Border
+            pygame.draw.rect(env_gui.screen, env_gui.colors['blue'], button_rect, 3, border_radius=10)
+            
+            # Tier text (large)
+            tier_text = env_gui.font_large.render(f"Tier {action.tier}", True, env_gui.colors['blue'])
+            tier_rect = tier_text.get_rect(center=(button_rect.centerx, button_rect.centery))
+            env_gui.screen.blit(tier_text, tier_rect)
+            
+            button_rects.append((button_rect, action))
+            y_offset += button_height + button_spacing
+        
+        # Scroll indicator
+        if len(sorted_actions) > max_visible:
+            scroll_text = f"Showing {scroll_offset + 1}-{min(scroll_offset + max_visible, len(sorted_actions))} of {len(sorted_actions)}"
+            scroll_surface = env_gui.font_small.render(scroll_text, True, (100, 100, 100))
+            env_gui.screen.blit(scroll_surface, (panel_x + 10, panel_y + panel_height - 30))
+        
+        return button_rects, hovered_action
+    
     def _draw_action_menu(self, env_gui: ZombieEnvGui,
                          action_type: str,
                          actions: List[Action],
@@ -467,10 +708,9 @@ class ManualAgent:
                          max_visible: int,
                          mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Action]], Optional[Action]]:
         """
-        Draw Level 2/3 menu: specific action selection
+        Draw Level 3 menu for MOVE/JUMP: specific destination selection
         
-        For REVIVE (Level 2): Show all revival options
-        For MOVE/JUMP (Level 3): Show destination options for selected piece
+        For MOVE/JUMP: Show destination options for selected piece
         
         Returns:
             Tuple of (list of (rect, action) pairs, hovered action)
@@ -518,7 +758,7 @@ class ManualAgent:
         # Action list
         button_rects = []
         y_offset = panel_y + 60
-        button_height = 35
+        button_height = 26  # Reduced from 35 (75%)
         button_spacing = 5
         hovered_action = None
         
@@ -570,7 +810,7 @@ class ManualAgent:
                          panel_x: int, panel_y: int,
                          mouse_pos: Tuple[int, int]) -> pygame.Rect:
         """Draw back button and return its rect"""
-        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 40, 40)
+        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 30, 30)  # Reduced from 40x40 (75%)
         
         # Highlight on hover
         if back_rect.collidepoint(mouse_pos):
@@ -592,7 +832,7 @@ class ManualAgent:
         """Check if back button was clicked"""
         panel_x = env_gui.window_width - 400
         panel_y = 50
-        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 40, 40)
+        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 30, 30)  # Reduced from 40x40 (75%)
         return back_rect.collidepoint(mouse_pos)
     
     def _format_action_text(self, action: Action) -> str:
@@ -704,9 +944,9 @@ def play_manual_game(manual_player: Player = Player.RED):
     print("="*80)
     
     # Initial render
-    env_gui.render(show_wait_prompt=True)
-    print("\nPress any key to start...")
-    if not env_gui.wait_for_key():
+    env_gui.render()
+    print("\nClick Continue button to start...")
+    if not env_gui.wait_for_continue_button():
         return
     
     # Game loop
@@ -765,15 +1005,15 @@ def play_manual_game(manual_player: Player = Player.RED):
             env_gui.screen.blit(text, text_rect)
             pygame.display.flip()
             
-            print("\nPress any key to close...")
-            env_gui.wait_for_key()
+            print("\nClick Continue button to close...")
+            env_gui.wait_for_continue_button()
             break
         
         # Wait for next turn (only for AI turns)
         if not isinstance(agent, ManualAgent):
-            env_gui.render(last_action=action, show_wait_prompt=True)
-            print("Press any key to continue...")
-            if not env_gui.wait_for_key():
+            env_gui.render(last_action=action)
+            print("Click Continue button to continue...")
+            if not env_gui.wait_for_continue_button():
                 break
     
     env_gui.close()
@@ -798,9 +1038,9 @@ def play_manual_vs_manual():
     print("="*80)
     
     # Initial render
-    env_gui.render(show_wait_prompt=True)
-    print("\nPress any key to start...")
-    if not env_gui.wait_for_key():
+    env_gui.render()
+    print("\nClick Continue button to start...")
+    if not env_gui.wait_for_continue_button():
         return
     
     # Game loop
@@ -841,8 +1081,8 @@ def play_manual_vs_manual():
             env_gui.screen.blit(text, text_rect)
             pygame.display.flip()
             
-            print("Press any key to close...")
-            env_gui.wait_for_key()
+            print("Click Continue button to close...")
+            env_gui.wait_for_continue_button()
             break
     
     env_gui.close()
