@@ -48,7 +48,12 @@ class ManualAgent:
     def _select_action_gui(self, env_gui: ZombieEnvGui, 
                       legal_actions: List[Action]) -> Optional[Action]:
         """
-        Display actions and let player select via mouse clicks
+        Display actions in multi-level menu and let player select via mouse clicks
+        
+        Level 1: Choose action type (JUMP/REVIVE/MOVE)
+        Level 2: For JUMP/MOVE - choose piece to move (from position)
+                 For REVIVE - choose specific action
+        Level 3: For JUMP/MOVE - choose destination (to position)
         
         Returns:
             Selected action or None if cancelled
@@ -58,81 +63,184 @@ class ManualAgent:
         move_actions = [a for a in legal_actions if a.action_type == ActionType.MOVE]
         jump_actions = [a for a in legal_actions if a.action_type == ActionType.JUMP]
         
-        # Display selection UI
+        action_groups = {
+            'JUMP': jump_actions,
+            'REVIVE': revive_actions,
+            'MOVE': move_actions
+        }
+        
+        # Menu state
         selected_action = None
-        action_buttons = []
+        current_menu_level = 1  # 1 = type, 2 = from (or action for REVIVE), 3 = to
+        selected_type = None
+        selected_from_pos = None  # For MOVE/JUMP
         scroll_offset = 0
-        max_visible = 15  # Maximum actions visible at once
-        prev_hovered_action = None  # Track which action was hovered last frame
-        need_redraw = True  # Flag to control when to redraw
-    
+        max_visible = 15
+        prev_hovered = None
+        need_redraw = True
+        
         while selected_action is None:
-            # Get current mouse position
             mouse_pos = pygame.mouse.get_pos()
             
-            # Only redraw board if needed
+            # Redraw board if needed
             if need_redraw:
                 env_gui.render()
                 need_redraw = False
             
-            # Always draw action list panel on top
-            action_buttons, current_hovered_action = self._draw_action_list(
-                env_gui, 
-                revive_actions, 
-                move_actions, 
-                jump_actions,
-                scroll_offset,
-                max_visible,
-                mouse_pos
-            )
+            # Draw appropriate menu level
+            if current_menu_level == 1:
+                # Level 1: Type selection menu
+                type_buttons, hovered = self._draw_type_menu(env_gui, action_groups, mouse_pos)
+                
+                # Handle type selection
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        pygame.quit()
+                        return None
+                    
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        for rect, action_type in type_buttons:
+                            if rect.collidepoint(mouse_pos):
+                                if len(action_groups[action_type]) > 0:
+                                    selected_type = action_type
+                                    current_menu_level = 2
+                                    scroll_offset = 0
+                                    need_redraw = True
+                                    print(f"Selected type: {action_type}")
+                                break
+            
+            elif current_menu_level == 2:
+                # Level 2: For REVIVE - action list, For MOVE/JUMP - from position
+                if selected_type == 'REVIVE':
+                    # REVIVE: directly show action list (2-level menu)
+                    action_buttons, hovered = self._draw_action_menu(
+                        env_gui,
+                        selected_type,
+                        action_groups[selected_type],
+                        None,  # No from_pos for REVIVE
+                        scroll_offset,
+                        max_visible,
+                        mouse_pos
+                    )
+                    
+                    # Handle action selection and back button
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            pygame.quit()
+                            return None
+                        
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            if self._check_back_button(env_gui, mouse_pos):
+                                current_menu_level = 1
+                                selected_type = None
+                                need_redraw = True
+                                print("Back to type selection")
+                            else:
+                                for rect, action in action_buttons:
+                                    if rect.collidepoint(mouse_pos):
+                                        selected_action = action
+                                        print(f"Selected: {action}")
+                                        self._highlight_action(env_gui, action)
+                                        pygame.time.wait(500)
+                                        break
+                        
+                        elif event.type == pygame.MOUSEWHEEL:
+                            scroll_offset -= event.y
+                            scroll_offset = max(0, min(scroll_offset, 
+                                                     max(0, len(action_groups[selected_type]) - max_visible)))
+                            need_redraw = True
+                else:
+                    # MOVE/JUMP: show from position selection
+                    from_buttons, hovered = self._draw_from_position_menu(
+                        env_gui,
+                        selected_type,
+                        action_groups[selected_type],
+                        mouse_pos
+                    )
+                    
+                    # Handle from position selection
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            pygame.quit()
+                            return None
+                        
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            if self._check_back_button(env_gui, mouse_pos):
+                                current_menu_level = 1
+                                selected_type = None
+                                need_redraw = True
+                                print("Back to type selection")
+                            else:
+                                for rect, from_pos in from_buttons:
+                                    if rect.collidepoint(mouse_pos):
+                                        selected_from_pos = from_pos
+                                        current_menu_level = 3
+                                        scroll_offset = 0
+                                        need_redraw = True
+                                        print(f"Selected piece at: {from_pos}")
+                                        break
+            
+            else:  # current_menu_level == 3
+                # Level 3: Show destination options for selected piece
+                filtered_actions = [a for a in action_groups[selected_type] 
+                                   if a.from_pos == selected_from_pos]
+                
+                action_buttons, hovered = self._draw_action_menu(
+                    env_gui,
+                    selected_type,
+                    filtered_actions,
+                    selected_from_pos,
+                    scroll_offset,
+                    max_visible,
+                    mouse_pos
+                )
+                
+                # Handle destination selection
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        pygame.quit()
+                        return None
+                    
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        if self._check_back_button(env_gui, mouse_pos):
+                            current_menu_level = 2
+                            selected_from_pos = None
+                            scroll_offset = 0
+                            need_redraw = True
+                            print("Back to from position selection")
+                        else:
+                            for rect, action in action_buttons:
+                                if rect.collidepoint(mouse_pos):
+                                    selected_action = action
+                                    print(f"Selected: {action}")
+                                    self._highlight_action(env_gui, action)
+                                    pygame.time.wait(500)
+                                    break
+                    
+                    elif event.type == pygame.MOUSEWHEEL:
+                        scroll_offset -= event.y
+                        scroll_offset = max(0, min(scroll_offset, 
+                                                 max(0, len(filtered_actions) - max_visible)))
+                        need_redraw = True
             
             # Check if hover changed
-            if prev_hovered_action != current_hovered_action:
-                need_redraw = True  # Need to redraw on next frame
-                prev_hovered_action = current_hovered_action
+            if prev_hovered != hovered:
+                need_redraw = True
+                prev_hovered = hovered
             
             pygame.display.flip()
-            
-            # Handle events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    return None
-                
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    # Check if clicked on an action button
-                    for i, (rect, action) in enumerate(action_buttons):
-                        if rect.collidepoint(mouse_pos):
-                            selected_action = action
-                            print(f"Selected: {action}")
-                            # Highlight selected action
-                            self._highlight_action(env_gui, action)
-                            pygame.time.wait(500)  # Brief pause to show selection
-                            break
-                
-                elif event.type == pygame.MOUSEWHEEL:
-                    # Scroll through actions
-                    scroll_offset -= event.y
-                    scroll_offset = max(0, min(scroll_offset, 
-                                         max(0, len(legal_actions) - max_visible)))
-                    need_redraw = True  # Force redraw on scroll
-            
             env_gui.clock.tick(30)
         
         return selected_action
 
-    def _draw_action_list(self, env_gui: ZombieEnvGui,
-                     revive_actions: List[Action],
-                     move_actions: List[Action],
-                     jump_actions: List[Action],
-                     scroll_offset: int,
-                     max_visible: int,
-                     mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Action]], Optional[Action]]:
+    def _draw_type_menu(self, env_gui: ZombieEnvGui, 
+                       action_groups: dict,
+                       mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, str]], None]:
         """
-        Draw scrollable action list on the side panel
+        Draw Level 1 menu: action type selection
         
         Returns:
-            Tuple of (list of (rect, action) pairs, currently hovered action)
+            List of (rect, type_name) tuples
         """
         # Panel dimensions
         panel_x = env_gui.window_width - 400
@@ -148,15 +256,264 @@ class ManualAgent:
         
         # Draw border
         pygame.draw.rect(env_gui.screen, (100, 100, 100), 
-                    (panel_x, panel_y, panel_width, panel_height), 3)
+                        (panel_x, panel_y, panel_width, panel_height), 3)
         
         # Title
         title_text = env_gui.font_medium.render(
-            f"{self.player.name}'s Actions", 
+            f"{self.player.name}'s Turn", 
             True, 
             env_gui.colors['red'] if self.player == Player.RED else env_gui.colors['blue']
         )
         env_gui.screen.blit(title_text, (panel_x + 10, panel_y + 10))
+        
+        # Subtitle
+        subtitle_text = env_gui.font_small.render(
+            "Choose Action Type:", 
+            True, 
+            (50, 50, 50)
+        )
+        env_gui.screen.blit(subtitle_text, (panel_x + 10, panel_y + 50))
+        
+        # Type buttons
+        type_buttons = []
+        y_offset = panel_y + 90
+        button_height = 80
+        button_spacing = 20
+        
+        type_configs = [
+            ('JUMP', env_gui.colors['red'], '⚔'),
+            ('REVIVE', env_gui.colors['blue'], '♻'),
+            ('MOVE', (100, 100, 100), '→')
+        ]
+        
+        for type_name, color, icon in type_configs:
+            actions = action_groups[type_name]
+            count = len(actions)
+            
+            # Button rectangle
+            button_rect = pygame.Rect(
+                panel_x + 20,
+                y_offset,
+                panel_width - 40,
+                button_height
+            )
+            
+            # Highlight on hover (only if has actions)
+            if button_rect.collidepoint(mouse_pos) and count > 0:
+                pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect, border_radius=10)
+            elif count > 0:
+                pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect, border_radius=10)
+            else:
+                # Disabled appearance
+                pygame.draw.rect(env_gui.screen, (220, 220, 220), button_rect, border_radius=10)
+            
+            # Border (thicker if has actions)
+            border_width = 3 if count > 0 else 1
+            border_color = color if count > 0 else (180, 180, 180)
+            pygame.draw.rect(env_gui.screen, border_color, button_rect, border_width, border_radius=10)
+            
+            # Type name
+            name_text = env_gui.font_large.render(f"{icon} {type_name}", True, color if count > 0 else (180, 180, 180))
+            name_rect = name_text.get_rect(center=(button_rect.centerx, button_rect.centery - 15))
+            env_gui.screen.blit(name_text, name_rect)
+            
+            # Count
+            count_text = env_gui.font_medium.render(
+                f"{count} action{'s' if count != 1 else ''}", 
+                True, 
+                (100, 100, 100)
+            )
+            count_rect = count_text.get_rect(center=(button_rect.centerx, button_rect.centery + 20))
+            env_gui.screen.blit(count_text, count_rect)
+            
+            if count > 0:
+                type_buttons.append((button_rect, type_name))
+            
+            y_offset += button_height + button_spacing
+        
+        return type_buttons, None
+    
+    def _draw_from_position_menu(self, env_gui: ZombieEnvGui,
+                                action_type: str,
+                                actions: List[Action],
+                                mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Tuple[int, int]]], Optional[Tuple[int, int]]]:
+        """
+        Draw Level 2 menu for MOVE/JUMP: select which piece to move
+        
+        Returns:
+            Tuple of (list of (rect, from_pos) tuples, hovered from_pos)
+        """
+        # Panel dimensions
+        panel_x = env_gui.window_width - 400
+        panel_y = 50
+        panel_width = 380
+        panel_height = env_gui.window_height - 100
+        
+        # Draw panel background
+        panel_surface = pygame.Surface((panel_width, panel_height))
+        panel_surface.fill((250, 250, 250))
+        panel_surface.set_alpha(240)
+        env_gui.screen.blit(panel_surface, (panel_x, panel_y))
+        
+        # Draw border
+        pygame.draw.rect(env_gui.screen, (100, 100, 100), 
+                        (panel_x, panel_y, panel_width, panel_height), 3)
+        
+        # Back button
+        back_button_rect = self._draw_back_button(env_gui, panel_x, panel_y, mouse_pos)
+        
+        # Title
+        type_colors = {
+            'JUMP': env_gui.colors['red'],
+            'MOVE': (100, 100, 100)
+        }
+        title_text = env_gui.font_medium.render(
+            f"Select Piece to {action_type}", 
+            True, 
+            type_colors.get(action_type, (50, 50, 50))
+        )
+        env_gui.screen.blit(title_text, (panel_x + 60, panel_y + 15))
+        
+        # Get unique from positions
+        from_positions = {}
+        for action in actions:
+            from_pos = action.from_pos
+            if from_pos not in from_positions:
+                from_positions[from_pos] = []
+            from_positions[from_pos].append(action)
+        
+        # Sort by position
+        sorted_positions = sorted(from_positions.keys())
+        
+        # From position buttons
+        from_buttons = []
+        hovered_from_pos = None
+        y_offset = panel_y + 60
+        button_height = 70
+        button_spacing = 10
+        
+        for from_pos in sorted_positions:
+            row, col = from_pos
+            action_count = len(from_positions[from_pos])
+            
+            # Get piece info at this position
+            pieces = env_gui.board[row][col]
+            if not pieces:
+                continue
+            
+            total_tier = sum(p.tier for p in pieces)
+            piece_player = pieces[0].player
+            
+            # Button rectangle
+            button_rect = pygame.Rect(
+                panel_x + 20,
+                y_offset,
+                panel_width - 40,
+                button_height
+            )
+            
+            # Highlight on hover
+            if button_rect.collidepoint(mouse_pos):
+                pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect, border_radius=10)
+                hovered_from_pos = from_pos
+                # Preview this piece on board
+                self._preview_from_position(env_gui, from_pos)
+            else:
+                pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect, border_radius=10)
+            
+            # Border
+            piece_color = env_gui.colors['red'] if piece_player == Player.RED else env_gui.colors['blue']
+            pygame.draw.rect(env_gui.screen, piece_color, button_rect, 3, border_radius=10)
+            
+            # Position text
+            pos_text = env_gui.font_large.render(f"({row}, {col})", True, piece_color)
+            pos_rect = pos_text.get_rect(center=(button_rect.centerx, button_rect.centery - 15))
+            env_gui.screen.blit(pos_text, pos_rect)
+            
+            # Piece info
+            info_text = env_gui.font_small.render(
+                f"Tier {total_tier} - {action_count} option{'s' if action_count > 1 else ''}", 
+                True, 
+                (100, 100, 100)
+            )
+            info_rect = info_text.get_rect(center=(button_rect.centerx, button_rect.centery + 20))
+            env_gui.screen.blit(info_text, info_rect)
+            
+            from_buttons.append((button_rect, from_pos))
+            y_offset += button_height + button_spacing
+        
+        return from_buttons, hovered_from_pos
+    
+    def _preview_from_position(self, env_gui: ZombieEnvGui, from_pos: Tuple[int, int]):
+        """Highlight the from position on board"""
+        board_x = env_gui.margin
+        board_y = env_gui.margin
+        
+        row, col = from_pos
+        x = board_x + col * env_gui.cell_size
+        y = board_y + row * env_gui.cell_size
+        
+        # Draw semi-transparent highlight
+        highlight_surface = pygame.Surface((env_gui.cell_size, env_gui.cell_size))
+        highlight_surface.set_alpha(100)
+        highlight_surface.fill((100, 200, 255))
+        env_gui.screen.blit(highlight_surface, (x, y))
+    
+    def _draw_action_menu(self, env_gui: ZombieEnvGui,
+                         action_type: str,
+                         actions: List[Action],
+                         from_pos: Optional[Tuple[int, int]],
+                         scroll_offset: int,
+                         max_visible: int,
+                         mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Action]], Optional[Action]]:
+        """
+        Draw Level 2/3 menu: specific action selection
+        
+        For REVIVE (Level 2): Show all revival options
+        For MOVE/JUMP (Level 3): Show destination options for selected piece
+        
+        Returns:
+            Tuple of (list of (rect, action) pairs, hovered action)
+        """
+        # Panel dimensions
+        panel_x = env_gui.window_width - 400
+        panel_y = 50
+        panel_width = 380
+        panel_height = env_gui.window_height - 100
+        
+        # Draw panel background
+        panel_surface = pygame.Surface((panel_width, panel_height))
+        panel_surface.fill((250, 250, 250))
+        panel_surface.set_alpha(240)
+        env_gui.screen.blit(panel_surface, (panel_x, panel_y))
+        
+        # Draw border
+        pygame.draw.rect(env_gui.screen, (100, 100, 100), 
+                        (panel_x, panel_y, panel_width, panel_height), 3)
+        
+        # Back button
+        back_button_rect = self._draw_back_button(env_gui, panel_x, panel_y, mouse_pos)
+        
+        # Title with type name
+        type_colors = {
+            'JUMP': env_gui.colors['red'],
+            'REVIVE': env_gui.colors['blue'],
+            'MOVE': (100, 100, 100)
+        }
+        
+        if from_pos:
+            title_text = env_gui.font_medium.render(
+                f"{action_type} from {from_pos}", 
+                True, 
+                type_colors.get(action_type, (50, 50, 50))
+            )
+        else:
+            title_text = env_gui.font_medium.render(
+                f"{action_type} Actions", 
+                True, 
+                type_colors.get(action_type, (50, 50, 50))
+            )
+        env_gui.screen.blit(title_text, (panel_x + 60, panel_y + 15))
         
         # Action list
         button_rects = []
@@ -165,73 +522,78 @@ class ManualAgent:
         button_spacing = 5
         hovered_action = None
         
-        all_actions = []
-        
-        # Add section headers and actions
-        if jump_actions:
-            all_actions.append(('header', 'JUMP Actions:', None))
-            for action in jump_actions:
-                all_actions.append(('action', action, env_gui.colors['red']))
-        
-        if revive_actions:
-            all_actions.append(('header', 'REVIVE Actions:', None))
-            for action in revive_actions:
-                all_actions.append(('action', action, env_gui.colors['blue']))
-        
-        if move_actions:
-            all_actions.append(('header', 'MOVE Actions:', None))
-            for action in move_actions:
-                all_actions.append(('action', action, (100, 100, 100)))
-        
         # Draw visible actions (with scrolling)
-        visible_actions = all_actions[scroll_offset:scroll_offset + max_visible]
+        visible_actions = actions[scroll_offset:scroll_offset + max_visible]
         
-        for item in visible_actions:
-            if item[0] == 'header':
-                # Draw section header
-                header_text = env_gui.font_small.render(item[1], True, (50, 50, 50))
-                env_gui.screen.blit(header_text, (panel_x + 15, y_offset))
-                y_offset += 25
+        for action in visible_actions:
+            # Button rectangle
+            button_rect = pygame.Rect(
+                panel_x + 10,
+                y_offset,
+                panel_width - 20,
+                button_height
+            )
+            
+            # Highlight on hover
+            if button_rect.collidepoint(mouse_pos):
+                pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect)
+                hovered_action = action
+                # Show action preview on board
+                self._preview_action(env_gui, action)
             else:
-                # Draw action button
-                action = item[1]
-                color = item[2]
-                
-                # Button rectangle
-                button_rect = pygame.Rect(
-                    panel_x + 10, 
-                    y_offset, 
-                    panel_width - 20, 
-                    button_height
-                )
-                
-                # Highlight on hover
-                if button_rect.collidepoint(mouse_pos):
-                    pygame.draw.rect(env_gui.screen, (255, 255, 200), button_rect)
-                    hovered_action = action
-                    # Show action preview on board
-                    self._preview_action(env_gui, action)
-                else:
-                    pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect)
-                
-                # Border
-                pygame.draw.rect(env_gui.screen, color, button_rect, 2)
-                
-                # Action text
+                pygame.draw.rect(env_gui.screen, (255, 255, 255), button_rect)
+            
+            # Border
+            pygame.draw.rect(env_gui.screen, type_colors.get(action_type, (100, 100, 100)), button_rect, 2)
+            
+            # Action text - simplified for MOVE/JUMP when from_pos is known
+            if from_pos and action_type in ['MOVE', 'JUMP']:
+                action_text = self._format_destination_text(action)
+            else:
                 action_text = self._format_action_text(action)
-                text_surface = env_gui.font_small.render(action_text, True, color)
-                env_gui.screen.blit(text_surface, (button_rect.x + 5, button_rect.y + 8))
-                
-                button_rects.append((button_rect, action))
-                y_offset += button_height + button_spacing
-    
+            
+            text_surface = env_gui.font_small.render(action_text, True, type_colors.get(action_type, (50, 50, 50)))
+            env_gui.screen.blit(text_surface, (button_rect.x + 5, button_rect.y + 8))
+            
+            button_rects.append((button_rect, action))
+            y_offset += button_height + button_spacing
+        
         # Scroll indicator
-        if len(all_actions) > max_visible:
-            scroll_text = f"Scroll: {scroll_offset + 1}-{min(scroll_offset + max_visible, len(all_actions))}/{len(all_actions)}"
+        if len(actions) > max_visible:
+            scroll_text = f"Showing {scroll_offset + 1}-{min(scroll_offset + max_visible, len(actions))} of {len(actions)}"
             scroll_surface = env_gui.font_small.render(scroll_text, True, (100, 100, 100))
             env_gui.screen.blit(scroll_surface, (panel_x + 10, panel_y + panel_height - 30))
         
         return button_rects, hovered_action
+    
+    def _draw_back_button(self, env_gui: ZombieEnvGui, 
+                         panel_x: int, panel_y: int,
+                         mouse_pos: Tuple[int, int]) -> pygame.Rect:
+        """Draw back button and return its rect"""
+        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 40, 40)
+        
+        # Highlight on hover
+        if back_rect.collidepoint(mouse_pos):
+            pygame.draw.rect(env_gui.screen, (255, 255, 200), back_rect, border_radius=5)
+        else:
+            pygame.draw.rect(env_gui.screen, (255, 255, 255), back_rect, border_radius=5)
+        
+        # Border
+        pygame.draw.rect(env_gui.screen, (100, 100, 100), back_rect, 2, border_radius=5)
+        
+        # Back arrow
+        arrow_text = env_gui.font_large.render("<", True, (50, 50, 50))
+        arrow_rect = arrow_text.get_rect(center=back_rect.center)
+        env_gui.screen.blit(arrow_text, arrow_rect)
+        
+        return back_rect
+    
+    def _check_back_button(self, env_gui: ZombieEnvGui, mouse_pos: Tuple[int, int]) -> bool:
+        """Check if back button was clicked"""
+        panel_x = env_gui.window_width - 400
+        panel_y = 50
+        back_rect = pygame.Rect(panel_x + 10, panel_y + 10, 40, 40)
+        return back_rect.collidepoint(mouse_pos)
     
     def _format_action_text(self, action: Action) -> str:
         """Format action as readable text"""
@@ -243,6 +605,19 @@ class ManualAgent:
             steps = len(action.jump_sequence) if action.jump_sequence else 0
             score = action.expected_score
             return f"Jump {action.from_pos} → {action.to_pos} ({steps} steps, +{score})"
+        return str(action)
+    
+    def _format_destination_text(self, action: Action) -> str:
+        """Format destination text when from position is already known"""
+        if action.action_type == ActionType.MOVE:
+            return f"→ {action.to_pos}"
+        elif action.action_type == ActionType.JUMP:
+            steps = len(action.jump_sequence) if action.jump_sequence else 0
+            score = action.expected_score
+            if action.to_pos == (-1, -1):
+                return f"→ Jump off board ({steps} steps, +{score})"
+            else:
+                return f"→ {action.to_pos} ({steps} steps, +{score})"
         return str(action)
     
     def _preview_action(self, env_gui: ZombieEnvGui, action: Action):
