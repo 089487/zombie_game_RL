@@ -115,9 +115,20 @@ class ManualAgent:
                 # Level 2: Choose position (from_pos for MOVE/JUMP, to_pos for REVIVE)
                 if selected_type == 'REVIVE':
                     # REVIVE: show to position selection
+                    # Get unique positions for max calculation
+                    to_positions_temp = {}
+                    for action in action_groups[selected_type]:
+                        to_pos = action.to_pos
+                        if to_pos not in to_positions_temp:
+                            to_positions_temp[to_pos] = []
+                        to_positions_temp[to_pos].append(action)
+                    total_positions = len(to_positions_temp)
+                    
                     to_buttons, hovered = self._draw_to_position_menu(
                         env_gui,
                         action_groups[selected_type],
+                        scroll_offset,
+                        max_visible,
                         mouse_pos
                     )
                     
@@ -131,6 +142,7 @@ class ManualAgent:
                             if self._check_back_button(env_gui, mouse_pos):
                                 current_menu_level = 1
                                 selected_type = None
+                                scroll_offset = 0
                                 need_redraw = True
                                 print("Back to type selection")
                             else:
@@ -142,12 +154,29 @@ class ManualAgent:
                                         need_redraw = True
                                         print(f"Selected revive position: {to_pos}")
                                         break
+                        
+                        elif event.type == pygame.MOUSEWHEEL:
+                            scroll_offset -= event.y
+                            scroll_offset = max(0, min(scroll_offset, 
+                                                     max(0, total_positions - max_visible)))
+                            need_redraw = True
                 else:
                     # MOVE/JUMP: show from position selection
+                    # Get unique positions for max calculation
+                    from_positions_temp = {}
+                    for action in action_groups[selected_type]:
+                        from_pos = action.from_pos
+                        if from_pos not in from_positions_temp:
+                            from_positions_temp[from_pos] = []
+                        from_positions_temp[from_pos].append(action)
+                    total_positions = len(from_positions_temp)
+                    
                     from_buttons, hovered = self._draw_from_position_menu(
                         env_gui,
                         selected_type,
                         action_groups[selected_type],
+                        scroll_offset,
+                        max_visible,
                         mouse_pos
                     )
                     
@@ -161,6 +190,7 @@ class ManualAgent:
                             if self._check_back_button(env_gui, mouse_pos):
                                 current_menu_level = 1
                                 selected_type = None
+                                scroll_offset = 0
                                 need_redraw = True
                                 print("Back to type selection")
                             else:
@@ -172,6 +202,12 @@ class ManualAgent:
                                         need_redraw = True
                                         print(f"Selected piece at: {from_pos}")
                                         break
+                        
+                        elif event.type == pygame.MOUSEWHEEL:
+                            scroll_offset -= event.y
+                            scroll_offset = max(0, min(scroll_offset, 
+                                                     max(0, total_positions - max_visible)))
+                            need_redraw = True
             
             else:  # current_menu_level == 3
                 # Level 3: Show final selection
@@ -372,6 +408,8 @@ class ManualAgent:
     def _draw_from_position_menu(self, env_gui: ZombieEnvGui,
                                 action_type: str,
                                 actions: List[Action],
+                                scroll_offset: int,
+                                max_visible: int,
                                 mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Tuple[int, int]]], Optional[Tuple[int, int]]]:
         """
         Draw Level 2 menu for MOVE/JUMP: select which piece to move
@@ -428,7 +466,10 @@ class ManualAgent:
         button_height = 52  # Reduced from 70 (75%)
         button_spacing = 10
         
-        for from_pos in sorted_positions:
+        # Draw visible positions (with scrolling)
+        visible_positions = sorted_positions[scroll_offset:scroll_offset + max_visible]
+        
+        for from_pos in visible_positions:
             row, col = from_pos
             action_count = len(from_positions[from_pos])
             
@@ -478,6 +519,12 @@ class ManualAgent:
             from_buttons.append((button_rect, from_pos))
             y_offset += button_height + button_spacing
         
+        # Scroll indicator
+        if len(sorted_positions) > max_visible:
+            scroll_text = f"Showing {scroll_offset + 1}-{min(scroll_offset + max_visible, len(sorted_positions))} of {len(sorted_positions)}"
+            scroll_surface = env_gui.font_small.render(scroll_text, True, (100, 100, 100))
+            env_gui.screen.blit(scroll_surface, (panel_x + 10, panel_y + panel_height - 30))
+        
         return from_buttons, hovered_from_pos
     
     def _preview_from_position(self, env_gui: ZombieEnvGui, from_pos: Tuple[int, int]):
@@ -497,6 +544,8 @@ class ManualAgent:
     
     def _draw_to_position_menu(self, env_gui: ZombieEnvGui,
                               actions: List[Action],
+                              scroll_offset: int,
+                              max_visible: int,
                               mouse_pos: Tuple[int, int]) -> Tuple[List[Tuple[pygame.Rect, Tuple[int, int]]], Optional[Tuple[int, int]]]:
         """
         Draw Level 2 menu for REVIVE: select position to revive to
@@ -546,10 +595,13 @@ class ManualAgent:
         to_buttons = []
         hovered_to_pos = None
         y_offset = panel_y + 60
-        button_height = 52
+        button_height = 52  # Reduced from 70 (75%)
         button_spacing = 10
         
-        for to_pos in sorted_positions:
+        # Draw visible positions (with scrolling)
+        visible_positions = sorted_positions[scroll_offset:scroll_offset + max_visible]
+        
+        for to_pos in visible_positions:
             row, col = to_pos
             action_count = len(to_positions[to_pos])
             
@@ -593,6 +645,12 @@ class ManualAgent:
             
             to_buttons.append((button_rect, to_pos))
             y_offset += button_height + button_spacing
+        
+        # Scroll indicator
+        if len(sorted_positions) > max_visible:
+            scroll_text = f"Showing {scroll_offset + 1}-{min(scroll_offset + max_visible, len(sorted_positions))} of {len(sorted_positions)}"
+            scroll_surface = env_gui.font_small.render(scroll_text, True, (100, 100, 100))
+            env_gui.screen.blit(scroll_surface, (panel_x + 10, panel_y + panel_height - 30))
         
         return to_buttons, hovered_to_pos
     
@@ -653,7 +711,7 @@ class ManualAgent:
         # Tier selection buttons
         button_rects = []
         y_offset = panel_y + 60
-        button_height = 52
+        button_height = 52  # Reduced from 70 (75%)
         button_spacing = 10
         hovered_action = None
         

@@ -181,7 +181,7 @@ class ZombieEnv:
             
             # Jump off board (out of bounds)
             if not (0 <= land_row < self.board_size and 0 <= land_col < self.board_size):
-                results.append(((-1, -1), continuous_pieces[:], False))
+                results.append(((-1, -1), continuous_pieces[:], True))
         
         # Option 2: Jump over first K pieces (K < N), stack on piece K+1 (if own higher tier)
         for k in range(len(continuous_pieces)):
@@ -210,7 +210,8 @@ class ZombieEnv:
                                 initial_path: List[Tuple],
                                 initial_score: float,
                                 player: Player,
-                                jumping_tier: int) -> Tuple[List[Tuple], Tuple[int, int], float]:
+                                jumping_tier: int,
+                                top_k: int = 5) -> Tuple[List[Tuple], Tuple[int, int], float]:
         """
         Run Dijkstra from a position to find the best jump path (only landing on empty cells)
         
@@ -220,7 +221,7 @@ class ZombieEnv:
             initial_score: Initial score
             player: Current player
             jumping_tier: Total tier of jumping pieces
-        
+            top_k: Number of best paths to return
         Returns:
             (best_path, end_position, best_score)
         """
@@ -233,6 +234,9 @@ class ZombieEnv:
         best_path = initial_path_copy
         best_score = initial_score
         best_end = start_pos
+
+        # best_k_paths is a min-heap of (neg_score, path, end_pos) and it would store the top K paths(the k largest scores) found so far
+        best_k_paths = [(-initial_score, initial_path_copy, start_pos)]
         
         while pq:
             neg_score, path, pos = heapq.heappop(pq)
@@ -242,11 +246,16 @@ class ZombieEnv:
                 continue
             visited.add(pos)
             
-            # Update best path
+            """# Update best path
             if score > best_score:
                 best_score = score
                 best_path = copy.deepcopy(path)
                 best_end = pos
+            """
+
+            heapq.heappush(best_k_paths, (-score, copy.deepcopy(path), pos))
+            if len(best_k_paths) > top_k:   
+                heapq.heappop(best_k_paths)  # Remove lowest score path to maintain top K
             
             # Try jumping from current position in all 4 directions
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
@@ -270,10 +279,13 @@ class ZombieEnv:
                     
                     heapq.heappush(pq, (-new_score, new_path, land_pos))
         
-        return best_path, best_end, best_score
+
+        return best_k_paths  # Return top K paths instead of just the best one
+        #return best_path, best_end, best_score
     
     def _get_best_paths_by_initial_direction(self, row: int, col: int, 
-                                            player: Player) -> Dict[str, List[Tuple]]:
+                                            player: Player,
+                                            top_k: int = 5) -> Dict[str, List[Tuple]]:
         """
         Get best jump paths for each initial direction (up/down/left/right)
         Can return multiple paths per direction (for different terminal actions)
@@ -310,12 +322,16 @@ class ZombieEnv:
                 
                 if can_continue:
                     # Run Dijkstra from landing position
-                    best_path, end_pos, best_score = self._dijkstra_from_position(
-                        land_pos, initial_path, first_score, player, jumping_tier
+                    best_k_paths = self._dijkstra_from_position(
+                        land_pos, initial_path, first_score, player, jumping_tier, top_k
                     )
                     
-                    # Add this path
-                    result[dir_name].append((copy.deepcopy(best_path), end_pos, best_score))
+
+                    # Add THOSE paths to result (not just the single best one)
+                    for neg_score, path, end_pos in best_k_paths:
+                        score = -neg_score
+                        result[dir_name].append((copy.deepcopy(path), end_pos, score))
+                    #result[dir_name].append((copy.deepcopy(best_path), end_pos, best_score))
                 else:
                     # Terminal action (stacking or jumping off board)
                     result[dir_name].append((copy.deepcopy(initial_path), land_pos, first_score))
