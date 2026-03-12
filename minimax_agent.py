@@ -11,7 +11,7 @@ Minimax Agent for Zombie Game with Alpha-Beta Pruning
 import copy
 import math
 from typing import Optional, Tuple, List
-from Zombie_env import ZombieEnv, Action, ActionType, Player, Piece
+from Zombie_env import ZombieEnv, Action, ActionType, Player, Piece, Card
 
 
 class MinimaxAgent:
@@ -72,8 +72,8 @@ class MinimaxAgent:
             env_copy = copy.deepcopy(env)
             env_copy.step(action)
             
-            # Minimax search (opponent's turn)
-            value = self._minimax(env_copy, self.max_depth - 1, alpha, beta, False)
+            # Minimax search
+            value = self._minimax(env_copy, self.max_depth - 1, alpha, beta)
             
             if self.verbose:
                 print(f"  Action: {action} -> Value: {value:.2f}")
@@ -97,10 +97,15 @@ class MinimaxAgent:
         board_str = str([[tuple((p.player, p.tier) for p in cell) for cell in row] for row in env.board])
         under_world_str = str({player: dict(env.underworld[player]) for player in [Player.RED, Player.BLUE]})
         score_str = str(env.scores)
-        return hash((board_str, under_world_str, score_str, env.current_player))
+        effects_str = str({str(p): sorted(v) for p, v in env.turn_effects.items()})
+        prot_str = str({str(p): sorted(v) for p, v in env.protected_positions.items()})
+        uses_str = str({str(p): {str(k): v for k, v in u.items()} for p, u in env.card_uses.items()})
+        jumped_str = str([(p.player, p.tier) for p in env.jumpedout_pieces])
+        dbl_str = str(env.pending_double_revive)
+        return hash((board_str, under_world_str, score_str, env.current_player,
+                     effects_str, prot_str, uses_str, jumped_str, dbl_str))
     
-    def _minimax(self, env: ZombieEnv, depth: int, alpha: float, beta: float, 
-                 is_maximizing: bool) -> float:
+    def _minimax(self, env: ZombieEnv, depth: int, alpha: float, beta: float) -> float:
         """
         Minimax algorithm with alpha-beta pruning
         
@@ -109,11 +114,11 @@ class MinimaxAgent:
             depth: Remaining search depth
             alpha: Alpha value for pruning
             beta: Beta value for pruning
-            is_maximizing: True if maximizing player's turn
         
         Returns:
             Evaluation value of the state
         """
+        is_maximizing = (env.current_player == self.player)
         
 
         # check transposition table
@@ -126,13 +131,19 @@ class MinimaxAgent:
         self.nodes_searched += 1
         
         # Check if game is over
-        current_player = env.current_player
-        opponent = Player.BLUE if current_player == Player.RED else Player.RED
+        our_opponent = Player.BLUE if self.player == Player.RED else Player.RED
         
         # Terminal state: someone won
-        if env.scores[self.player] >= env.win_score:
+        # Card 3 (WIN_AT_5): score == 5 is an extra win condition; normal >= win_score still applies
+        our_win = env.scores[self.player] >= env.win_score or (
+            env.cards.get(self.player) == Card.WIN_AT_5 and env.scores[self.player] == 5
+        )
+        opp_win = env.scores[our_opponent] >= env.win_score or (
+            env.cards.get(our_opponent) == Card.WIN_AT_5 and env.scores[our_opponent] == 5
+        )
+        if our_win:
             return 10000  # We win
-        if env.scores[opponent] >= env.win_score:
+        if opp_win:
             return -10000  # Opponent wins
         
         # Depth limit reached: evaluate state
@@ -141,12 +152,12 @@ class MinimaxAgent:
         
         legal_actions = env.get_legal_actions()
         
-        # No legal actions: opponent wins
+        # No legal actions: current player loses
         if not legal_actions:
             if is_maximizing:
-                return -10000  # We lose
+                return -10000  # We have no moves, we lose
             else:
-                return 10000   # Opponent loses (we win)
+                return 10000   # Opponent has no moves, we win
         
         # Sort actions for better pruning
         sorted_actions = self._sort_actions(legal_actions, env)
@@ -158,7 +169,7 @@ class MinimaxAgent:
                 env_copy = copy.deepcopy(env)
                 env_copy.step(action)
                 
-                eval_value = self._minimax(env_copy, depth - 1, alpha, beta, False)
+                eval_value = self._minimax(env_copy, depth - 1, alpha, beta)
                 max_eval = max(max_eval, eval_value)
                 alpha = max(alpha, eval_value)
                 
@@ -176,7 +187,7 @@ class MinimaxAgent:
                 env_copy = copy.deepcopy(env)
                 env_copy.step(action)
                 
-                eval_value = self._minimax(env_copy, depth - 1, alpha, beta, True)
+                eval_value = self._minimax(env_copy, depth - 1, alpha, beta)
                 min_eval = min(min_eval, eval_value)
                 beta = min(beta, eval_value)
                 
@@ -200,66 +211,60 @@ class MinimaxAgent:
             Evaluation score (positive = good for us, negative = bad)
         """
         opponent = Player.BLUE if self.player == Player.RED else Player.RED
-        
+
         score = 0.0
-        
-        # 1. Score difference (weight: 100)
-        score_diff = env.scores[self.player] - env.scores[opponent]
-        score += score_diff * 100
-        
-        # 2. Board piece values
-        our_board_value = 0
-        opp_board_value = 0
-        our_piece_positions = []
-        opp_piece_positions = []
-        
+
+        # 1. 分數差（最重要）
+        score += (env.scores[self.player] - env.scores[opponent]) * 100
+
+        our_board_tier = 0
+        opp_board_tier = 0
+        our_advance = 0
+        opp_advance = 0
+        our_positions = []   # (r, c, cell_tier)
+        opp_positions = []
+
         for r in range(env.board_size):
             for c in range(env.board_size):
                 cell = env.board[r][c]
-                if len(cell) > 0:
-                    for piece in cell:
-                        piece_value = piece.tier
-                        # Bonus for stacking
-                        if len(cell) > 1:
-                            piece_value *= 1.2
-                        
-                        # Positional bonus (center control)
-                        center_dist = abs(r - 2) + abs(c - 2)
-                        position_bonus = (4 - center_dist) * 0.5
-                        
-                        if piece.player == self.player:
-                            our_board_value += piece_value + position_bonus
-                            our_piece_positions.append((r, c))
-                        else:
-                            opp_board_value += piece_value + position_bonus
-                            opp_piece_positions.append((r, c))
-        
-        score += (our_board_value - opp_board_value) * 10
-        
-        # 3. Underworld piece values (slight penalty)
-        our_underworld = sum(tier * count for tier, count in env.underworld[self.player].items())
-        opp_underworld = sum(tier * count for tier, count in env.underworld[opponent].items())
-        score += (opp_underworld - our_underworld) * 2  # Opponent's pieces in underworld is good
-        
-        # 4. Tactical advantages
-        # 4a. Proximity to opponent (aggressive positioning)
-        if our_piece_positions and opp_piece_positions:
-            avg_distance = 0
-            for our_pos in our_piece_positions:
-                min_dist = min(abs(our_pos[0] - opp[0]) + abs(our_pos[1] - opp[1]) 
-                              for opp in opp_piece_positions)
-                avg_distance += min_dist
-            avg_distance /= len(our_piece_positions)
-            # Closer is better (more jump opportunities)
-            score += (10 - avg_distance) * 1.0
-        
-        # 4b. Tier diversity on board (having high-tier pieces active is good)
-        our_max_tier = max((p.tier for r in env.board for cell in r for p in cell 
-                           if p.player == self.player), default=0)
-        opp_max_tier = max((p.tier for r in env.board for cell in r for p in cell 
-                           if p.player == opponent), default=0)
-        score += (our_max_tier - opp_max_tier) * 2
-        
+                if not cell:
+                    continue
+                cell_tier = sum(p.tier for p in cell)
+                stacking_bonus = 1.2 if len(cell) > 1 else 1.0
+                if cell[0].player == self.player:
+                    our_board_tier += cell_tier * stacking_bonus
+                    # RED 往 row 4 推進；BLUE 往 row 0 推進
+                    adv = r if self.player == Player.RED else (4 - r)
+                    our_advance += adv * cell_tier
+                    our_positions.append((r, c, cell_tier))
+                else:
+                    opp_board_tier += cell_tier * stacking_bonus
+                    adv = r if opponent == Player.RED else (4 - r)
+                    opp_advance += adv * cell_tier
+                    opp_positions.append((r, c, cell_tier))
+
+        # 2. 場上棋力差
+        score += (our_board_tier - opp_board_tier) * 8
+
+        # 3. 推進方向優勢（取代中心距離）
+        score += (our_advance - opp_advance) * 3
+
+        # 4. 跳躍威脅：我的棋與對手棋同行/列且距離 1~2 → 有潛在跳躍機會
+        jump_threat = 0
+        for our_r, our_c, _ in our_positions:
+            for opp_r, opp_c, opp_tier in opp_positions:
+                if our_r == opp_r or our_c == opp_c:
+                    dist = abs(our_r - opp_r) + abs(our_c - opp_c)
+                    if 1 <= dist <= 2:
+                        jump_threat += opp_tier
+        score += jump_threat * 5
+
+        # 5. 地下世界懲罰
+        our_uw = sum(t * cnt for t, cnt in env.underworld[self.player].items())
+        opp_uw = sum(t * cnt for t, cnt in env.underworld[opponent].items())
+        score -= our_uw * 3
+        score += opp_uw * 1
+
         return score
     
     def _sort_actions(self, actions: List[Action], env: ZombieEnv) -> List[Action]:

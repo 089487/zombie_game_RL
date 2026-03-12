@@ -16,7 +16,7 @@ Usage:
 
 import sys
 from typing import Optional, Dict, Any
-from Zombie_env import ZombieEnv, Player
+from Zombie_env import ZombieEnv, Player, Card
 from gui_wrapper import ZombieEnvGui
 
 
@@ -85,7 +85,8 @@ class Game:
     
     def __init__(self, red_agent_spec: str, blue_agent_spec: str,
                  use_gui: bool = False, animate: bool = True,
-                 verbose: bool = True, max_turns: int = 100):
+                 verbose: bool = True, max_turns: int = 100,
+                 red_card: Card = Card.NONE, blue_card: Card = Card.NONE):
         """
         Initialize game
         
@@ -103,9 +104,11 @@ class Game:
         self.animate = animate
         self.verbose = verbose
         self.max_turns = max_turns
+        self.red_card = red_card
+        self.blue_card = blue_card
         
         # Create environment
-        self.env = ZombieEnv()
+        self.env = ZombieEnv(red_card=red_card, blue_card=blue_card)
         
         # Create GUI wrapper if needed
         if self.use_gui or 'manual' in red_agent_spec.lower() or 'manual' in blue_agent_spec.lower():
@@ -309,6 +312,8 @@ Examples:
     parser.add_argument('--no-animate', action='store_true', help='Disable animations')
     parser.add_argument('--quiet', action='store_true', help='Minimal output')
     parser.add_argument('--max-turns', type=int, default=100, help='Maximum turns (default: 100)')
+    parser.add_argument('--red-card', type=int, default=0, help='RED player card (0-9, default: 0=none)')
+    parser.add_argument('--blue-card', type=int, default=0, help='BLUE player card (0-9, default: 0=none)')
     
     args = parser.parse_args()
     
@@ -322,7 +327,9 @@ Examples:
         use_gui=use_gui,
         animate=not args.no_animate,
         verbose=not args.quiet,
-        max_turns=args.max_turns
+        max_turns=args.max_turns,
+        red_card=Card(args.red_card),
+        blue_card=Card(args.blue_card)
     )
     
     try:

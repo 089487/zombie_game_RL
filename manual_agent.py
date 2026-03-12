@@ -60,14 +60,16 @@ class ManualAgent:
             Selected action or None if cancelled
         """
         # Group actions by type
-        revive_actions = [a for a in legal_actions if a.action_type == ActionType.REVIVE]
-        move_actions = [a for a in legal_actions if a.action_type == ActionType.MOVE]
-        jump_actions = [a for a in legal_actions if a.action_type == ActionType.JUMP]
+        revive_actions   = [a for a in legal_actions if a.action_type == ActionType.REVIVE]
+        move_actions     = [a for a in legal_actions if a.action_type == ActionType.MOVE]
+        jump_actions     = [a for a in legal_actions if a.action_type == ActionType.JUMP]
+        use_card_actions = [a for a in legal_actions if a.action_type == ActionType.USE_CARD]
         
         action_groups = {
             'JUMP': jump_actions,
             'REVIVE': revive_actions,
-            'MOVE': move_actions
+            'MOVE': move_actions,
+            'USE CARD': use_card_actions,
         }
         
         # Menu state
@@ -104,11 +106,15 @@ class ManualAgent:
                         for rect, action_type in type_buttons:
                             if rect.collidepoint(mouse_pos):
                                 if len(action_groups[action_type]) > 0:
-                                    selected_type = action_type
-                                    current_menu_level = 2
-                                    scroll_offset = 0
-                                    need_redraw = True
-                                    print(f"Selected type: {action_type}")
+                                    if action_type == 'USE CARD':
+                                        selected_action = action_groups['USE CARD'][0]
+                                        print(f"Selected: {selected_action}")
+                                    else:
+                                        selected_type = action_type
+                                        current_menu_level = 2
+                                        scroll_offset = 0
+                                        need_redraw = True
+                                        print(f"Selected type: {action_type}")
                                 break
             
             elif current_menu_level == 2:
@@ -300,9 +306,10 @@ class ManualAgent:
         button_spacing = 20
         
         type_configs = [
-            ('JUMP', env_gui.colors['red'], '⚔'),
-            ('REVIVE', env_gui.colors['blue'], '♻'),
-            ('MOVE', (100, 100, 100), '→')
+            ('JUMP',     env_gui.colors['red'],  '⚔'),
+            ('REVIVE',   env_gui.colors['blue'], '♻'),
+            ('MOVE',     (100, 100, 100),        '→'),
+            ('USE CARD', (180, 0, 180),          '🃏'),
         ]
         
         for type_name, color, icon in type_configs:

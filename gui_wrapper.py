@@ -10,7 +10,7 @@ Usage:
 import pygame
 import time
 from typing import Optional, Tuple, Dict
-from Zombie_env import ZombieEnv, Player, Action, ActionType, Piece
+from Zombie_env import ZombieEnv, Player, Action, ActionType, Piece, Card
 
 
 class ZombieEnvGui:
@@ -368,8 +368,10 @@ class ZombieEnvGui:
         
         # Draw scores
         score_y = panel_y + 35  # Reduced from 50
-        red_score = f"RED: {self.env.scores[Player.RED]}/{self.env.win_score}"
-        blue_score = f"BLUE: {self.env.scores[Player.BLUE]}/{self.env.win_score}"
+        red_threshold  = 5 if self.env.cards.get(Player.RED)  == Card.WIN_AT_5 else self.env.win_score
+        blue_threshold = 5 if self.env.cards.get(Player.BLUE) == Card.WIN_AT_5 else self.env.win_score
+        red_score  = f"RED: {self.env.scores[Player.RED]}/{red_threshold}"
+        blue_score = f"BLUE: {self.env.scores[Player.BLUE]}/{blue_threshold}"
         
         red_text = self.font_medium.render(red_score, True, self.colors['red'])
         blue_text = self.font_medium.render(blue_score, True, self.colors['blue'])
@@ -395,9 +397,53 @@ class ZombieEnvGui:
             text_rect = text.get_rect(center=(center_x + x_offset, underworld_y))
             self.screen.blit(text, text_rect)
         
+        # Draw card info
+        card_names = {
+            Card.DIAGONAL_TIER1: 'Card 1: Diagonal T1',
+            Card.REVIVE_ON_STACK: 'Card 2: Revive Stack',
+            Card.WIN_AT_5: 'Card 3: Win at 5',
+            Card.BLOCK_STACK: 'Card 4: Block Stack',
+            Card.STACK_SAME_TIER: 'Card 5: Same-Tier Stack',
+            Card.ONLY_REVIVE: 'Card 6: Only Revive',
+            Card.PROTECT_REVIVED: 'Card 7: Protect Revived',
+            Card.JUMP_REVIVE: 'Card 8: Jump Revive',
+            Card.DOUBLE_REVIVE: 'Card 9: Double Revive',
+        }
+        card_descriptions = {
+            Card.DIAGONAL_TIER1: 'Tier-1 can move/jump diagonally',
+            Card.REVIVE_ON_STACK: 'Revive T1 onto own T2/T3',
+            Card.WIN_AT_5: 'Win when score reaches 5',
+            Card.BLOCK_STACK: 'Opp cannot stack (3 uses)',
+            Card.STACK_SAME_TIER: 'Stack same tier; max 6, one 6-tier only',
+            Card.ONLY_REVIVE: 'Opp can only revive (2 uses)',
+            Card.PROTECT_REVIVED: 'Fresh T1/T2 safe for 1 opp turn',
+            Card.JUMP_REVIVE: 'Jump off → revive one of them',
+            Card.DOUBLE_REVIVE: 'Revive 2 pieces at once',
+        }
+        card_y = underworld_y + 30
+        has_card = False
+        for player in [Player.RED, Player.BLUE]:
+            card = self.env.cards.get(player, Card.NONE)
+            if card != Card.NONE:
+                has_card = True
+                x_offset = -250 if player == Player.RED else 250
+                color = self.colors['red'] if player == Player.RED else self.colors['blue']
+                
+                # Card name
+                label = card_names.get(card, str(card))
+                name_text = self.font_small.render(f'[{label}]', True, color)
+                self.screen.blit(name_text, name_text.get_rect(center=(center_x + x_offset, card_y)))
+                
+                # Card description (smaller, below name)
+                desc = card_descriptions.get(card, '')
+                if desc:
+                    desc_font = pygame.font.Font(None, 18)
+                    desc_text = desc_font.render(desc, True, (80, 80, 80))
+                    self.screen.blit(desc_text, desc_text.get_rect(center=(center_x + x_offset, card_y + 15)))
+        
         # Draw last action
         if last_action:
-            action_y = underworld_y + 30  # Reduced from 40
+            action_y = card_y + (45 if has_card else 0)
             action_text = f"Last: {last_action}"
             text = self.font_small.render(action_text, True, self.colors['text'])
             text_rect = text.get_rect(center=(center_x, action_y))
@@ -405,7 +451,9 @@ class ZombieEnvGui:
     
     def _animate_action(self, action: Action):
         """Animate an action"""
-        if action.action_type == ActionType.REVIVE:
+        if action.action_type == ActionType.USE_CARD:
+            return  # No animation for card use
+        elif action.action_type == ActionType.REVIVE:
             self._animate_revive(action)
         elif action.action_type == ActionType.MOVE:
             self._animate_move(action)

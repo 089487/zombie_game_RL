@@ -12,6 +12,19 @@ class ActionType(Enum):
     REVIVE = 0
     MOVE = 1
     JUMP = 2
+    USE_CARD = 3
+
+class Card(Enum):
+    NONE            = 0
+    DIAGONAL_TIER1  = 1   # 1阶可斜向移动/跳跃
+    REVIVE_ON_STACK = 2   # 复活1阶可叠在己方2/3阶上
+    WIN_AT_5        = 3   # 达到5分也算胜利
+    BLOCK_STACK     = 4   # 对手下回合不能叠加（3次）
+    STACK_SAME_TIER = 5   # 可叠相同tier，最高6阶且只能有1个6阶
+    ONLY_REVIVE     = 6   # 对手下回合只能REVIVE（2次）
+    PROTECT_REVIVED = 7   # 新复活的1/2阶对手跳过不计分
+    JUMP_REVIVE     = 8   # 主动跳出棋盘后可立即复活其中一个
+    DOUBLE_REVIVE   = 9   # REVIVE时可复活两个（不同格子）
 
 @dataclass
 class Piece:
@@ -37,6 +50,8 @@ class Action:
             return f"REVIVE(tier={self.tier}, to={self.to_pos}, score={self.expected_score})"
         elif self.action_type == ActionType.MOVE:
             return f"MOVE(from={self.from_pos}, to={self.to_pos}, score={self.expected_score})"
+        elif self.action_type == ActionType.USE_CARD:
+            return f"USE_CARD(card={self.tier})"
         else:  # JUMP
             steps = len(self.jump_sequence) if self.jump_sequence else 0
             return f"JUMP(from={self.from_pos}, dir={self.initial_direction}, steps={steps}, to={self.to_pos}, score={self.expected_score})"
@@ -44,7 +59,7 @@ class Action:
 class ZombieEnv:
     """Zombie Board Game Environment"""
     
-    def __init__(self):
+    def __init__(self, red_card: 'Card' = None, blue_card: 'Card' = None):
         self.board_size = 5
         self.win_score = 8
         
@@ -62,7 +77,26 @@ class ZombieEnv:
         
         # Current player
         self.current_player = Player.RED
-        
+
+        # Card system (Step 0+1)
+        self.cards = {
+            Player.RED:  red_card  if red_card  is not None else Card.NONE,
+            Player.BLUE: blue_card if blue_card is not None else Card.NONE,
+        }
+        # Remaining uses for active cards 4 and 6
+        self.card_uses = {
+            Player.RED:  {Card.BLOCK_STACK: 3, Card.ONLY_REVIVE: 2},
+            Player.BLUE: {Card.BLOCK_STACK: 3, Card.ONLY_REVIVE: 2},
+        }
+        # One-turn effects applied to a player by the opponent's active card
+        self.turn_effects = {Player.RED: set(), Player.BLUE: set()}
+        # Card 7: positions of freshly-revived protected pieces
+        self.protected_positions = {Player.RED: set(), Player.BLUE: set()}
+        # Card 8: pieces that jumped off board this turn (pending jump-revive)
+        self.jumpedout_pieces = []
+        # Card 9: waiting for the second REVIVE action
+        self.pending_double_revive = False
+
         # Initialize board
         self._setup_board()
     
@@ -93,6 +127,10 @@ class ZombieEnv:
         }
         self.scores = {Player.RED: 0, Player.BLUE: 0}
         self.current_player = Player.RED
+        self.turn_effects = {Player.RED: set(), Player.BLUE: set()}
+        self.protected_positions = {Player.RED: set(), Player.BLUE: set()}
+        self.jumpedout_pieces = []
+        self.pending_double_revive = False
         self._setup_board()
         return self.get_state()
     
@@ -117,8 +155,9 @@ class ZombieEnv:
         if not (0 <= to_row < self.board_size and 0 <= to_col < self.board_size):
             return False
         
-        # Must be adjacent
-        if abs(from_row - to_row) + abs(from_col - to_col) != 1:
+        # Must be adjacent (Chebyshev distance 1: allows orthogonal AND diagonal)
+        # Diagonal directions are only passed here when Card 1 is active (see get_legal_actions)
+        if max(abs(from_row - to_row), abs(from_col - to_col)) != 1:
             return False
         
         # Target must be empty or have own higher tier piece for stacking
@@ -130,8 +169,25 @@ class ZombieEnv:
         if target[0].player == player:
             moving_tier = sum(p.tier for p in self.board[from_row][from_col])
             target_tier = sum(p.tier for p in target)
-            return target_tier > moving_tier
-        
+
+            # Normal: target must be strictly higher tier
+            if target_tier > moving_tier:
+                return True
+
+            # Card 5 (STACK_SAME_TIER): can stack on equal-tier, merged <= 6, max one 6-tier
+            if self.cards[player] == Card.STACK_SAME_TIER and target_tier == moving_tier:
+                merged = moving_tier + target_tier
+                if merged > 6:
+                    return False
+                if merged == 6:
+                    # Ensure no other 6-tier cell exists on the board
+                    for r in range(self.board_size):
+                        for c in range(self.board_size):
+                            if (r, c) != (to_row, to_col) and (r, c) != (from_row, from_col):
+                                if sum(p.tier for p in self.board[r][c]) == 6:
+                                    return False
+                return True
+
         return False
     
     def _try_jump_direction(self, row: int, col: int, dr: int, dc: int, 
@@ -231,12 +287,9 @@ class ZombieEnv:
         initial_path_copy = copy.deepcopy(initial_path)
         pq = [(-initial_score, initial_path_copy, start_pos)]
         visited = set()
-        best_path = initial_path_copy
-        best_score = initial_score
-        best_end = start_pos
 
-        # best_k_paths is a min-heap of (neg_score, path, end_pos) and it would store the top K paths(the k largest scores) found so far
-        best_k_paths = [(-initial_score, initial_path_copy, start_pos)]
+        # best_k_paths stores (score, path, end_pos); positive score so heappop removes LOWEST, keeping top-K highest
+        best_k_paths = []
         
         while pq:
             neg_score, path, pos = heapq.heappop(pq)
@@ -245,17 +298,14 @@ class ZombieEnv:
             if pos in visited:
                 continue
             visited.add(pos)
-            
-            """# Update best path
-            if score > best_score:
-                best_score = score
-                best_path = copy.deepcopy(path)
-                best_end = pos
-            """
 
-            heapq.heappush(best_k_paths, (-score, copy.deepcopy(path), pos))
+            heapq.heappush(best_k_paths, (score, copy.deepcopy(path), pos))
             if len(best_k_paths) > top_k:   
-                heapq.heappop(best_k_paths)  # Remove lowest score path to maintain top K
+                heapq.heappop(best_k_paths)  # removes LOWEST score, keeps top-K highest
+
+            # Cannot continue jumping from off-board position
+            if pos == (-1, -1):
+                continue
             
             # Try jumping from current position in all 4 directions
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
@@ -268,10 +318,11 @@ class ZombieEnv:
                     if land_pos in visited:
                         continue
                     
-                    # Calculate score from jumped opponent pieces
+                    # Calculate score from jumped opponent pieces (skip protected positions)
                     jump_score = sum(
                         sum(p.tier for p in self.board[r][c] if p.player == opponent)
                         for r, c in jumped_pieces
+                        if (r, c) not in self.protected_positions[opponent]
                     )
                     
                     new_score = score + jump_score
@@ -285,7 +336,8 @@ class ZombieEnv:
     
     def _get_best_paths_by_initial_direction(self, row: int, col: int, 
                                             player: Player,
-                                            top_k: int = 5) -> Dict[str, List[Tuple]]:
+                                            top_k: int = 5,
+                                            extra_dirs: list = None) -> Dict[str, List[Tuple]]:
         """
         Get best jump paths for each initial direction (up/down/left/right)
         Can return multiple paths per direction (for different terminal actions)
@@ -303,6 +355,13 @@ class ZombieEnv:
             'left': (0, -1),
             'right': (0, 1)
         }
+        # Card 1: add diagonal directions if provided
+        if extra_dirs:
+            diag_names = {(-1,-1): 'up-left', (-1,1): 'up-right',
+                          (1,-1):  'down-left', (1,1): 'down-right'}
+            for dr, dc in extra_dirs:
+                name = diag_names.get((dr, dc), f'diag_{dr}_{dc}')
+                directions[name] = (dr, dc)
         
         for dir_name, (dr, dc) in directions.items():
             result[dir_name] = []
@@ -311,10 +370,11 @@ class ZombieEnv:
             first_jump_results = self._try_jump_direction(row, col, dr, dc, player, jumping_tier)
             
             for land_pos, jumped_pieces, can_continue in first_jump_results:
-                # Calculate first jump score
+                # Calculate first jump score (skip protected positions)
                 first_score = sum(
                     sum(p.tier for p in self.board[r][c] if p.player == opponent)
                     for r, c in jumped_pieces
+                    if (r, c) not in self.protected_positions[opponent]
                 )
                 
                 # Initial path
@@ -328,10 +388,8 @@ class ZombieEnv:
                     
 
                     # Add THOSE paths to result (not just the single best one)
-                    for neg_score, path, end_pos in best_k_paths:
-                        score = -neg_score
+                    for score, path, end_pos in best_k_paths:
                         result[dir_name].append((copy.deepcopy(path), end_pos, score))
-                    #result[dir_name].append((copy.deepcopy(best_path), end_pos, best_score))
                 else:
                     # Terminal action (stacking or jumping off board)
                     result[dir_name].append((copy.deepcopy(initial_path), land_pos, first_score))
@@ -364,7 +422,8 @@ class ZombieEnv:
         
         return options
     
-    def _get_jump_actions_from_position(self, row: int, col: int, player: Player) -> List[Action]:
+    def _get_jump_actions_from_position(self, row: int, col: int, player: Player,
+                                         extra_dirs: list = None) -> List[Action]:
         """
         Generate all jump actions from a position (with expected scores)
         """
@@ -373,7 +432,7 @@ class ZombieEnv:
         opponent = Player.BLUE if player == Player.RED else Player.RED
         
         # Get best paths for each initial direction
-        best_paths = self._get_best_paths_by_initial_direction(row, col, player)
+        best_paths = self._get_best_paths_by_initial_direction(row, col, player, extra_dirs=extra_dirs)
         
         for dir_name, paths_list in best_paths.items():
             for path, end_pos, base_score in paths_list:
@@ -399,10 +458,11 @@ class ZombieEnv:
                     extended_options = self._get_extended_jump_options(end_pos, jumping_tier, player)
                     
                     for option in extended_options:
-                        # Calculate extra score from extended jump
+                        # Calculate extra score from extended jump (skip protected positions)
                         extra_score = sum(
                             sum(p.tier for p in self.board[r][c] if p.player == opponent)
                             for r, c in option['jumped_pieces']
+                            if (r, c) not in self.protected_positions[opponent]
                         )
                         
                         extended_path = copy.deepcopy(path) + [(option['land_pos'], option['jumped_pieces'])]
@@ -423,8 +483,49 @@ class ZombieEnv:
         """Get all legal actions for current player (with expected scores)"""
         actions = []
         player = self.current_player
-        
+
+        # Card 8: pending jump-revive — only allow reviving one of the jumped-out pieces
+        if self.cards[player] == Card.JUMP_REVIVE and self.jumpedout_pieces:
+            jump_revive_actions = []
+            seen_tiers = set()
+            for piece in self.jumpedout_pieces:
+                if piece.tier not in seen_tiers:
+                    seen_tiers.add(piece.tier)
+                    for row in range(self.board_size):
+                        for col in range(self.board_size):
+                            if len(self.board[row][col]) == 0:
+                                jump_revive_actions.append(Action(
+                                    action_type=ActionType.REVIVE,
+                                    from_pos=None,
+                                    to_pos=(row, col),
+                                    tier=piece.tier,
+                                    initial_direction=None,
+                                    jump_sequence=None,
+                                    expected_score=0.0
+                                ))
+            return jump_revive_actions
+
+        # Card 9: pending second revive — only allow reviving one more piece
+        if self.cards[player] == Card.DOUBLE_REVIVE and self.pending_double_revive:
+            second_revive_actions = []
+            for tier in [1, 2, 3]:
+                if self.underworld[player][tier] > 0:
+                    for row in range(self.board_size):
+                        for col in range(self.board_size):
+                            if len(self.board[row][col]) == 0:
+                                second_revive_actions.append(Action(
+                                    action_type=ActionType.REVIVE,
+                                    from_pos=None,
+                                    to_pos=(row, col),
+                                    tier=tier,
+                                    initial_direction=None,
+                                    jump_sequence=None,
+                                    expected_score=0.0
+                                ))
+            return second_revive_actions
+
         # 1. Revive actions
+        opponent = Player.BLUE if player == Player.RED else Player.RED
         for tier in [1, 2, 3]:
             if self.underworld[player][tier] > 0:
                 for row in range(self.board_size):
@@ -439,13 +540,32 @@ class ZombieEnv:
                                 jump_sequence=None,
                                 expected_score=0.0
                             ))
+                        # Card 2: revive tier-1 onto own tier-2 or tier-3 cell
+                        elif (tier == 1
+                              and self.cards[player] == Card.REVIVE_ON_STACK
+                              and len(self.board[row][col]) > 0
+                              and all(p.player == player for p in self.board[row][col])
+                              and sum(p.tier for p in self.board[row][col]) in (2, 3)):
+                            actions.append(Action(
+                                action_type=ActionType.REVIVE,
+                                from_pos=None,
+                                to_pos=(row, col),
+                                tier=tier,
+                                initial_direction=None,
+                                jump_sequence=None,
+                                expected_score=0.0
+                            ))
         
         # 2. Move actions
         for row in range(self.board_size):
             for col in range(self.board_size):
                 if self._has_own_pieces(row, col, player):
-                    # Try all 4 directions
-                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    # Card 1: tier-1 pieces can move diagonally
+                    cell_tier = sum(p.tier for p in self.board[row][col])
+                    move_dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    if self.cards[player] == Card.DIAGONAL_TIER1 and cell_tier == 1:
+                        move_dirs += [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+                    for dr, dc in move_dirs:
                         new_row, new_col = row + dr, col + dc
                         if self._is_valid_move(row, col, new_row, new_col, player):
                             actions.append(Action(
@@ -462,9 +582,49 @@ class ZombieEnv:
         for row in range(self.board_size):
             for col in range(self.board_size):
                 if self._has_own_pieces(row, col, player):
-                    jump_actions = self._get_jump_actions_from_position(row, col, player)
+                    # Card 1: tier-1 pieces can also jump diagonally
+                    cell_tier = sum(p.tier for p in self.board[row][col])
+                    extra_dirs = []
+                    if self.cards[player] == Card.DIAGONAL_TIER1 and cell_tier == 1:
+                        extra_dirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+                    jump_actions = self._get_jump_actions_from_position(row, col, player, extra_dirs=extra_dirs)
                     actions.extend(jump_actions)
-        
+
+        # 4. Active card use (Card 4 / Card 6) — usable before own move, once per turn
+        if self.cards[player] == Card.BLOCK_STACK:
+            if (self.card_uses[player][Card.BLOCK_STACK] > 0
+                    and 'no_stack' not in self.turn_effects[opponent]):
+                actions.append(Action(
+                    action_type=ActionType.USE_CARD,
+                    from_pos=None, to_pos=None,
+                    tier=4,
+                    initial_direction=None, jump_sequence=None,
+                    expected_score=0.0
+                ))
+        if self.cards[player] == Card.ONLY_REVIVE:
+            if (self.card_uses[player][Card.ONLY_REVIVE] > 0
+                    and 'only_revive' not in self.turn_effects[opponent]):
+                actions.append(Action(
+                    action_type=ActionType.USE_CARD,
+                    from_pos=None, to_pos=None,
+                    tier=6,
+                    initial_direction=None, jump_sequence=None,
+                    expected_score=0.0
+                ))
+
+        # 5. Filter actions based on turn_effects imposed by opponent's card last turn
+        if 'only_revive' in self.turn_effects[player]:
+            # Can ONLY revive — remove moves, jumps, and card-use actions
+            actions = [a for a in actions if a.action_type == ActionType.REVIVE]
+        elif 'no_stack' in self.turn_effects[player]:
+            # Cannot stack —  remove MOVE actions that target a non-empty cell
+            def _is_stacking_move(a):
+                if a.action_type != ActionType.MOVE:
+                    return False
+                to_r, to_c = a.to_pos
+                return len(self.board[to_r][to_c]) > 0
+            actions = [a for a in actions if not _is_stacking_move(a)]
+
         return actions
     
     def step(self, action: Action) -> Tuple[Dict, float, bool, Dict]:
@@ -475,12 +635,46 @@ class ZombieEnv:
         opponent = Player.BLUE if player == Player.RED else Player.RED
         reward = 0
         
+        if action.action_type == ActionType.USE_CARD:
+            card_num = action.tier
+            if card_num == 4:   # BLOCK_STACK
+                self.card_uses[player][Card.BLOCK_STACK] -= 1
+                self.turn_effects[opponent].add('no_stack')
+            elif card_num == 6:  # ONLY_REVIVE
+                self.card_uses[player][Card.ONLY_REVIVE] -= 1
+                self.turn_effects[opponent].add('only_revive')
+            # Card use does NOT switch the current player — player still acts this turn
+            return self.get_state(), 0, False, {'expected_score': 0.0, 'actual_reward': 0}
+
         if action.action_type == ActionType.REVIVE:
             tier = action.tier
             row, col = action.to_pos
-            self.board[row][col] = [Piece(player, tier)]
+            if len(self.board[row][col]) > 0:
+                # Card 2: stacking revive onto own piece
+                self.board[row][col].append(Piece(player, tier))
+            else:
+                self.board[row][col] = [Piece(player, tier)]
             self.underworld[player][tier] -= 1
-        
+            # Card 7: mark freshly-revived tier-1/2 as protected for opponent's next turn
+            if self.cards[player] == Card.PROTECT_REVIVED and tier in (1, 2):
+                self.protected_positions[player].add((row, col))
+            # Card 8: this was the pending jump-revive → clear flag, fall through to switch player
+            if self.jumpedout_pieces:
+                self.jumpedout_pieces = []
+            # Card 9: first REVIVE → trigger pending second revive if pieces remain in underworld
+            elif self.cards[player] == Card.DOUBLE_REVIVE and not self.pending_double_revive:
+                has_remaining = any(self.underworld[player][t] > 0 for t in [1, 2, 3])
+                if has_remaining:
+                    self.pending_double_revive = True
+                    self.scores[player] += reward
+                    done = self.scores[player] >= self.win_score or (
+                        self.cards[player] == Card.WIN_AT_5 and self.scores[player] == 5
+                    )
+                    return self.get_state(), reward, done, {'expected_score': action.expected_score, 'actual_reward': reward}
+            # Card 9: second REVIVE → clear pending flag, fall through to switch player
+            elif self.pending_double_revive:
+                self.pending_double_revive = False
+
         elif action.action_type == ActionType.MOVE:
             from_row, from_col = action.from_pos
             to_row, to_col = action.to_pos
@@ -507,13 +701,17 @@ class ZombieEnv:
                     
                     for piece in cell_pieces:
                         if piece.player == opponent:
+                            # Card 7: skip if this position is protected
+                            if (j_row, j_col) in self.protected_positions[opponent]:
+                                continue
                             reward += piece.tier
                             self.underworld[opponent][piece.tier] += 1
-                        # Own pieces stay in place (不做任何处理)
+                        # Own pieces stay in place
                     
-                    # Only remove opponent pieces
+                    # Remove opponent pieces that are NOT protected
                     self.board[j_row][j_col] = [
-                        p for p in self.board[j_row][j_col] if p.player == player
+                        p for p in self.board[j_row][j_col]
+                        if p.player == player or (j_row, j_col) in self.protected_positions[opponent]
                     ]
             
             # Final landing
@@ -521,6 +719,14 @@ class ZombieEnv:
             if final_land == (-1, -1):  # Jump off board
                 for piece in pieces:
                     self.underworld[player][piece.tier] += 1
+                # Card 8: trigger pending jump-revive — player keeps their turn
+                if self.cards[player] == Card.JUMP_REVIVE:
+                    self.jumpedout_pieces = pieces[:]
+                    self.scores[player] += reward
+                    done = self.scores[player] >= self.win_score or (
+                        self.cards[player] == Card.WIN_AT_5 and self.scores[player] == 5
+                    )
+                    return self.get_state(), reward, done, {'expected_score': action.expected_score, 'actual_reward': reward}
             elif len(self.board[final_land[0]][final_land[1]]) > 0:
                 # Stack on existing piece
                 self.board[final_land[0]][final_land[1]].extend(pieces)
@@ -532,10 +738,17 @@ class ZombieEnv:
         self.scores[player] += reward
         
         # Check win condition
-        done = self.scores[player] >= self.win_score
+        # Card 3 (WIN_AT_5): score == 5 is an extra win condition; normal >= win_score still applies
+        done = self.scores[player] >= self.win_score or (
+            self.cards[player] == Card.WIN_AT_5 and self.scores[player] == 5
+        )
         
         # Switch player
         if not done:
+            # Clear effects that were constraining THIS player's turn
+            self.turn_effects[player].clear()
+            # Clear OPPONENT's protection (it was valid for this one opponent-turn)
+            self.protected_positions[opponent].clear()
             self.current_player = opponent
         
         # Info includes expected vs actual score comparison
