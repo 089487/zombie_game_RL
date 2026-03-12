@@ -31,6 +31,7 @@ class MinimaxAgent:
         self.verbose = verbose
         self.nodes_searched = 0  # Statistics
         self.pruned_count = 0    # Statistics
+        self.transposition_table = {}  # For memoization (optional)
     
     def get_action(self, env: ZombieEnv) -> Optional[Action]:
 
@@ -88,6 +89,15 @@ class MinimaxAgent:
             print(f"[Stats] Nodes searched: {self.nodes_searched}, Pruned: {self.pruned_count}")
         
         return best_action
+    def _get_state_hash(self, env: ZombieEnv) -> int:
+        """
+        Generate a hashable representation of the game state for transposition table
+        This can be used to store previously evaluated states to avoid redundant calculations
+        """
+        board_str = str([[tuple((p.player, p.tier) for p in cell) for cell in row] for row in env.board])
+        under_world_str = str({player: dict(env.underworld[player]) for player in [Player.RED, Player.BLUE]})
+        score_str = str(env.scores)
+        return hash((board_str, under_world_str, score_str, env.current_player))
     
     def _minimax(self, env: ZombieEnv, depth: int, alpha: float, beta: float, 
                  is_maximizing: bool) -> float:
@@ -104,6 +114,15 @@ class MinimaxAgent:
         Returns:
             Evaluation value of the state
         """
+        
+
+        # check transposition table
+        state_hash = self._get_state_hash(env)
+        if state_hash in self.transposition_table:
+            cached_depth, cached_value = self.transposition_table[state_hash]
+            if cached_depth >= depth:
+                return cached_value  # Use cached value if it's from an equal or deeper search
+
         self.nodes_searched += 1
         
         # Check if game is over
@@ -146,6 +165,8 @@ class MinimaxAgent:
                 if beta <= alpha:
                     self.pruned_count += 1
                     break  # Beta cutoff
+
+            self.transposition_table[state_hash] = (depth, max_eval)  # Store in transposition table
             
             return max_eval
         else:
@@ -162,7 +183,7 @@ class MinimaxAgent:
                 if beta <= alpha:
                     self.pruned_count += 1
                     break  # Alpha cutoff
-            
+            self.transposition_table[state_hash] = (depth, min_eval)  # Store in transposition table
             return min_eval
     
     def _evaluate_state(self, env: ZombieEnv) -> float:
